@@ -297,6 +297,12 @@ Viewer 面由插件挂载在 DSH WebServer origin 上：`/univer-viewer` 前缀�
 Gateway 本身始终只监听 loopback，不对外暴露。完整契约见
 `docs/viewer-same-origin-deployment.md`。
 
+嵌入宿主可在创建 Viewer proxy 时提供自己的 Univer `license + pbk`。代理只向已经由 HttpOnly
+scope cookie 绑定到 live session 的浏览器通过 `/univer-viewer/license` 返回该配置，并明确禁止缓存；
+未配置时返回空响应，直接访问未挂载该端点的 loopback Gateway 时则返回 404；Viewer 在这两种
+情况下使用包内开发 license。Viewer、merge preview 和 Compare 共用同一份启动时加载的 license
+authority，不各自推导或保存副本。
+
 Unit 的导入、检查、执行和导出由 Unit Content Adapter 启动一次性 Unit Content Worker。Worker 连接 Gateway Supervisor 提供的同一个 Gateway，操作完成或取消后退出，不拥有独立持久状态。Gateway 的 worktree 控制面直接提供 Unit 创建与移除端点，并通过 collaboration service 与 lifecycle event 完成操作。写操作只能针对显式 draft worktree；Gateway 是提交结果和 revision 的唯一依据。
 
 Gateway 通过 SDK `register(router)` 注册 HTTP/WebSocket Endpoint，连接跟踪保留路由参数，并在打开失败或关闭时释放记录。Worktree Unit 删除保留应用现有流程；SDK 的可撤销移除接口 `setUnitRemoved` 在本地 Adapter 中明确返回 `INVALID_REQUEST`，不写入移除状态或改变文件格式。Gateway 为 SDK collaboration service 注入 `ILogger`：warn/error 始终写入 Gateway stderr，debug/info 仅在 `UNIVER_DSH_GATEWAY_DEBUG=1` 时输出；SDK 内部失败若没有该 logger 只会表现为不可诊断的通用 500。数据库 Adapter 遵循 SDK 的快照读取契约（`getChangesets`/`getDraftChangesets` 返回裸 changeset 数组，`null` 表示 Unit 不存在）。

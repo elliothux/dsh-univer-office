@@ -16,6 +16,13 @@ export interface ViewerProxyOptions {
   readonly gatewayOrigin: () => Promise<string>
   readonly sessions: SessionStore
   readonly connection: ConnectionTrust
+  /** Optional production license exposed only to a browser bound to a live Viewer session. */
+  readonly viewerLicense?: ViewerLicense
+}
+
+export interface ViewerLicense {
+  readonly license: string
+  readonly pbk: string
 }
 
 export interface ViewerProxy {
@@ -44,7 +51,7 @@ function reject(res: ServerResponse, status: 401 | 403 | 404 | 502): void {
  * to the loopback Gateway. See docs/viewer-same-origin-deployment.md for the contract.
  */
 export function createViewerProxy(options: ViewerProxyOptions): ViewerProxy {
-  const { gatewayOrigin, sessions, connection } = options
+  const { gatewayOrigin, sessions, connection, viewerLicense } = options
   const wss = new WebSocketServer({ noServer: true })
   const bridges = new Set<() => void>()
 
@@ -56,6 +63,20 @@ export function createViewerProxy(options: ViewerProxyOptions): ViewerProxy {
     }
     const url = new URL(req.url ?? '/', 'http://localhost')
     const pathname = url.pathname
+    if (pathname === `${VIEWER_BASE}/license`) {
+      if (!hasLiveViewerSession(req, sessions)) {
+        reject(res, 403)
+        return
+      }
+      res.writeHead(viewerLicense === undefined ? 204 : 200, {
+        'cache-control': 'no-store',
+        ...(viewerLicense === undefined
+          ? {}
+          : { 'content-type': 'application/json; charset=utf-8' })
+      })
+      res.end(viewerLicense === undefined ? undefined : JSON.stringify(viewerLicense))
+      return
+    }
     if (pathname === VIEWER_BASE || pathname === `${VIEWER_BASE}/`) {
       // The Viewer document carries the addressing parameters: authorize the file against the
       // named live session, then bind this browser to that session scope for later /uf requests.
@@ -214,6 +235,10 @@ export function createViewerProxy(options: ViewerProxyOptions): ViewerProxy {
   }
 
   return { httpHandler, upgradeHandler, dispose }
+}
+
+function hasLiveViewerSession(req: IncomingMessage, sessions: SessionStore): boolean {
+  return readScopeCookie(req).some((sessionId) => sessions.get(SessionId(sessionId)) !== undefined)
 }
 
 /** Forward one browser request to the loopback Gateway, streaming both body directions. */

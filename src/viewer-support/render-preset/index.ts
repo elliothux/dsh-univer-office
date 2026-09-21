@@ -133,7 +133,7 @@ function registerBasePlugins(
   univer: Univer,
   container: string,
   collaborationOwnsAssetIo: boolean,
-  license: string,
+  license: ViewLicenseConfig,
   hideWorkbenchChrome = false,
   ribbonType?: RibbonType
 ): void {
@@ -150,7 +150,7 @@ function registerBasePlugins(
     collaborationOwnsAssetIo ? { override: [[IImageIoService, null]] } : undefined
   )
   univer.registerPlugin(UniverDrawingUIPlugin)
-  univer.registerPlugin(UniverLicensePlugin, { license })
+  univer.registerPlugin(UniverLicensePlugin, license)
   univer.registerPlugin(UniverProFormulaEnginePlugin, { notExecuteFormula: false })
   univer.registerPlugin(UniverRangePreprocessPlugin)
   univer.registerPlugin(UniverDocsPlugin)
@@ -359,10 +359,15 @@ export enum ViewAssetIoOwner {
   CollaborationClient = 'collaboration-client'
 }
 
+export interface ViewLicenseConfig {
+  readonly license: string
+  readonly pbk?: string
+}
+
 export interface ViewRenderingOptions {
   container: string
   assetIoOwner: ViewAssetIoOwner
-  license: string
+  license: string | ViewLicenseConfig
   workbenchChrome: 'hidden' | 'visible'
   ribbonType?: RibbonType
   /** Hide native table editing anchors in comparison panes without removing table rendering. */
@@ -387,7 +392,7 @@ export function registerViewRendering(univer: Univer, options: ViewRenderingOpti
     univer,
     options.container,
     collaborationOwnsAssetIo,
-    options.license,
+    typeof options.license === 'string' ? { license: options.license } : options.license,
     options.workbenchChrome === 'hidden',
     options.ribbonType
   )

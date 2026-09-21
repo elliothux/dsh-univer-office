@@ -51,7 +51,7 @@ import {
   FormulaCalculationSessionService,
   SetTriggerFormulaCalculationStartMutation
 } from '@univerjs/engine-formula'
-import { TEST_LICENSE, ViewAssetIoOwner, registerViewRendering } from '@univer/render-preset'
+import { ViewAssetIoOwner, registerViewRendering } from '@univer/render-preset'
 import {
   buildRuntimeConfig,
   UNIT_TYPE_BASE,
@@ -72,6 +72,7 @@ import { createCollaborationSheetResourceRefDataProvider } from './collaboration
 import { installHistoryShapeFormulaCompatibility } from './history-shape-formula-compatibility'
 import { loadViewerLocale } from './locales/generated/load'
 import { initializeDocumentViewPosition } from './document-view-position'
+import { loadViewerLicense } from './license'
 
 installHistoryShapeFormulaCompatibility()
 
@@ -116,7 +117,10 @@ declare global {
  */
 export async function createViewer(opts: ViewerOptions): Promise<ViewerHandle> {
   const editable = opts.editable === true
-  const localePack = await loadViewerLocale(opts.locale)
+  const [localePack, license] = await Promise.all([
+    loadViewerLocale(opts.locale),
+    loadViewerLicense()
+  ])
   const readOnlyEnforcement = resolveViewerReadOnlyEnforcement(opts.unitType, editable)
   const urls = buildRuntimeConfig(
     opts.gatewayFileKey === undefined
@@ -172,7 +176,7 @@ export async function createViewer(opts: ViewerOptions): Promise<ViewerHandle> {
   registerViewRendering(univer, {
     container: opts.container,
     assetIoOwner: ViewAssetIoOwner.CollaborationClient,
-    license: TEST_LICENSE,
+    license,
     workbenchChrome: resolveViewerWorkbenchChrome(opts.unitType, editable),
     ribbonType: 'grid',
     unitType: toUniverInstanceType(opts.unitType),
@@ -327,7 +331,10 @@ export interface PreviewViewerOptions {
  * opens comb and never writes back. Switching unit/worktree is done by disposing and recreating.
  */
 export async function createPreviewViewer(opts: PreviewViewerOptions): Promise<ViewerHandle> {
-  const localePack = await loadViewerLocale(opts.locale)
+  const [localePack, license] = await Promise.all([
+    loadViewerLocale(opts.locale),
+    loadViewerLicense()
+  ])
   const univer = new Univer({
     locale: opts.locale,
     locales: { [opts.locale]: localePack },
@@ -337,7 +344,7 @@ export async function createPreviewViewer(opts: PreviewViewerOptions): Promise<V
   registerViewRendering(univer, {
     container: opts.container,
     assetIoOwner: ViewAssetIoOwner.Local,
-    license: TEST_LICENSE,
+    license,
     // Merge previews are inspection surfaces. The surrounding preview shell owns navigation,
     // labels and actions, so mounting an editor ribbon is both redundant and a
     // misleading affordance even though mutation commands are vetoed below.

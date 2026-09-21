@@ -13,7 +13,11 @@ export type { UniverConfig }
 export { GatewayUniverService } from './provider/gateway-univer-service.ts'
 export { UniverService } from './service/univer-service.ts'
 export { createUniverRouter } from './webServer/router.ts'
-export { createViewerProxy, type ConnectionTrust } from './webServer/viewer-proxy.ts'
+export {
+  createViewerProxy,
+  type ConnectionTrust,
+  type ViewerLicense
+} from './webServer/viewer-proxy.ts'
 export { edgeBrowserCandidatePaths } from './provider/render-operations.ts'
 export {
   captureTelemetry,

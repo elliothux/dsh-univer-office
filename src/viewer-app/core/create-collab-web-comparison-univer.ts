@@ -15,13 +15,15 @@ import type {
 } from '@univer/unit-comparison-viewer'
 import { loadViewerLocale } from './locales/generated/load'
 import { blockLocalEditingCommands } from './viewer-readonly'
+import { loadViewerLicense } from './license'
 
 export const createCollabWebComparisonUniver: UnitComparisonUniverFactory = async (
   options
 ): Promise<IUnitComparisonUniverInstance> => {
-  const [localePack, renderPreset] = await Promise.all([
+  const [localePack, renderPreset, license] = await Promise.all([
     loadViewerLocale(options.locale),
     import('@univer/render-preset'),
+    loadViewerLicense(),
     import('@univer/render-preset/facades')
   ])
   const univer = new Univer({
@@ -35,7 +37,7 @@ export const createCollabWebComparisonUniver: UnitComparisonUniverFactory = asyn
     renderPreset.registerViewRendering(univer, {
       container: options.container.id,
       assetIoOwner: renderPreset.ViewAssetIoOwner.Local,
-      license: renderPreset.TEST_LICENSE,
+      license,
       workbenchChrome: 'hidden',
       sheetTableUI: { hideAnchor: true },
       unitType: toUniverInstanceType(options.unitType)

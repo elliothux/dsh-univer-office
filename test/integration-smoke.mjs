@@ -192,7 +192,8 @@ try {
     sessions: {
       get: (id) => (id === PROXY_SESSION ? { header: { cwd: workspace } } : undefined)
     },
-    connection: { requestRejection: () => gateRejection }
+    connection: { requestRejection: () => gateRejection },
+    viewerLicense: { license: 'integration-license', pbk: 'integration-pbk' }
   })
   const proxyServer = createHttpServer((req, res) => void proxy.httpHandler(req, res))
   proxyServer.on('upgrade', proxy.upgradeHandler)
@@ -243,6 +244,23 @@ try {
       throw new Error(
         `Viewer document did not bind the session scope: ${document.headers.get('set-cookie')}`
       )
+    }
+    const unscopedLicense = await fetch(`${proxyOrigin}/univer-viewer/license`)
+    if (unscopedLicense.status !== 403) {
+      throw new Error(
+        `Viewer license without a live scope must be refused: ${unscopedLicense.status}`
+      )
+    }
+    const licenseResponse = await fetch(`${proxyOrigin}/univer-viewer/license`, {
+      headers: { cookie: scopeCookie }
+    })
+    if (
+      !licenseResponse.ok ||
+      JSON.stringify(await licenseResponse.json()) !==
+        JSON.stringify({ license: 'integration-license', pbk: 'integration-pbk' }) ||
+      licenseResponse.headers.get('cache-control') !== 'no-store'
+    ) {
+      throw new Error('Viewer license was not served to the scoped browser')
     }
     const scopedAsset = documentHtml.match(/\/univer-viewer\/assets\/[^"']+\.css/u)?.[0]
     if (scopedAsset === undefined) {
