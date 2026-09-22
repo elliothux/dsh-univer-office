@@ -91,8 +91,8 @@ export function ReadonlyUniverWorkbookView(input: {
     selectedKindRef.current = input.selectedKind ?? null
     selectedRangeRef.current = input.selectedRange ?? null
     activeSheetIdRef.current = input.activeSheetId ?? null
-  // The viewport subscription outlives worksheet changes; use the current sheet's callback.
-  onScrollChangeRef.current = input.onScrollChange
+    // The viewport subscription outlives worksheet changes; use the current sheet's callback.
+    onScrollChangeRef.current = input.onScrollChange
     gapConfigRef.current = input.gapConfig ?? null
     highlightsRef.current = input.highlights ?? []
   }, [
