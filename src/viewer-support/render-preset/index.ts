@@ -105,6 +105,7 @@ import {
 import { UniverSheetsUIPlugin } from '@univerjs/sheets-ui'
 // import { UniverThreadCommentUIPlugin } from "@univerjs/thread-comment-ui";
 import { UniverUIPlugin, type RibbonType } from '@univerjs/ui'
+import { ViewProductLicensePlugin } from './product-license.js'
 import { createViewBaseResourceRefDataProviderRegistration } from './view-base-resource-ref-data-provider.js'
 
 export type { BoardModel, IBoardLayoutAnalysisResult, IBoardRect } from '@univerjs-pro/boards'
@@ -151,6 +152,7 @@ function registerBasePlugins(
   )
   univer.registerPlugin(UniverDrawingUIPlugin)
   univer.registerPlugin(UniverLicensePlugin, license)
+  if (license.pbk !== undefined) univer.registerPlugin(ViewProductLicensePlugin, license)
   univer.registerPlugin(UniverProFormulaEnginePlugin, { notExecuteFormula: false })
   univer.registerPlugin(UniverRangePreprocessPlugin)
   univer.registerPlugin(UniverDocsPlugin)

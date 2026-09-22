@@ -28,8 +28,8 @@
 ## 2. 必须保留的产品功能
 
 - 在 DSH 会话中发现 `.univer` 文件，并为每个文件显示采用统一审阅布局的回合尾部卡片；
-- 在 DSH 内以 Viewer 全屏预览文件；
-- worktree 创建或更新后显示实时浮动窗口；
+- 全屏动作在 DSH 内以 Viewer 全屏预览文件；
+- worktree 创建或更新后显示 DSH 实时浮动窗口；
 - 用户可在 DSH 插件设置中关闭实时浮动窗口，且不影响回合尾部审阅卡片；
 - 一个 worktree 改动多个 unit 时，只列出有改动的 unit 并允许切换；
 - draft 或 ready worktree 的 Viewer 可在 View 与 Compare 间切换，把当前 worktree 与固定的 trunk 或另一个活跃 worktree 并排比较，并为 Sheet、Doc、Slide、Base 与 Board 提供语义差异列表、定位和显式刷新；

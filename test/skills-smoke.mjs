@@ -66,6 +66,11 @@ if (
   !slide.content.includes('univer_lint') ||
   !slide.content.includes('univer_screenshot') ||
   !slide.content.includes('univer_resources') ||
+  !slide.content.includes('example `.temp/<deck-name>/`') ||
+  !slide.content.includes('user-visible workspace') ||
+  !slide.content.includes('produces the native `.univer` file only') ||
+  !slide.content.includes('univer_print_pdf` only when the user explicitly requests PDF') ||
+  !slide.content.includes('Do not present page SVGs, build scripts') ||
   !slide.content.includes('A new Slide Unit already contains one empty page')
 ) {
   throw new Error('bundled Slide skill is missing proactive generation guidance')

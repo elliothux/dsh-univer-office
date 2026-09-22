@@ -38,10 +38,7 @@ import { UniverBoardsHistoryUIPlugin } from '@univerjs-pro/boards-history-ui'
 import { UniverDocsHistoryUIPlugin } from '@univerjs-pro/docs-history-ui'
 import { UniverSheetsHistoryUIPlugin } from '@univerjs-pro/sheets-history-ui'
 import { UniverSlidesHistoryUIPlugin } from '@univerjs-pro/slides-history-ui'
-import {
-  BrowserCollaborationSocketService,
-  UniverCollaborationClientUIPlugin
-} from '@univerjs-pro/collaboration-client-ui'
+import { UniverCollaborationClientUIPlugin } from '@univerjs-pro/collaboration-client-ui'
 import {
   EmbedModelService,
   EmbedReferencedUnitMaterializeService,
@@ -73,6 +70,7 @@ import { installHistoryShapeFormulaCompatibility } from './history-shape-formula
 import { loadViewerLocale } from './locales/generated/load'
 import { initializeDocumentViewPosition } from './document-view-position'
 import { loadViewerLicense } from './license'
+import { GuardedBrowserCollaborationSocketService } from './guarded-browser-collaboration-socket-service'
 
 installHistoryShapeFormulaCompatibility()
 
@@ -198,7 +196,7 @@ export async function createViewer(opts: ViewerOptions): Promise<ViewerHandle> {
     registerBeforeEmbedCore: () => {
       univer.registerPlugin(UniverCollaborationPlugin)
       univer.registerPlugin(UniverCollaborationClientPlugin, {
-        socketService: BrowserCollaborationSocketService,
+        socketService: GuardedBrowserCollaborationSocketService,
         enableOfflineEditing: false,
         enableAuthServer: true,
         enableSingleActiveInstanceLock: false,

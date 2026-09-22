@@ -69,6 +69,7 @@ async function bootstrap(): Promise<void> {
           loc.editable,
           loc.mode
         )
+  window.addEventListener('pagehide', () => app.dispose(), { once: true })
   app.start().catch((error: unknown) => {
     if (error instanceof WorktreeServerHttpError && error.status === 404) {
       // Missing univerfile: the service never auto-creates one, so tell the user to create it first.

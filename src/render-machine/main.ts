@@ -4,6 +4,7 @@ import '@univer/render-preset/facades'
 import { LocaleType, Univer } from '@univerjs/core'
 import { TEST_LICENSE, ViewAssetIoOwner, registerViewRendering } from '@univer/render-preset'
 import { CONTENT_EN_US } from '@univer/render-preset/machine-locale'
+import { decodeRenderLicense } from '../shared/render-license'
 
 const container = document.querySelector<HTMLElement>('#app')
 if (container === null) throw new Error('render page requires an #app container')
@@ -20,7 +21,7 @@ await mountUniverRenderPage({
     registerViewRendering(univer, {
       container: 'app',
       assetIoOwner: ViewAssetIoOwner.Local,
-      license: license ?? TEST_LICENSE,
+      license: decodeRenderLicense(license ?? TEST_LICENSE),
       workbenchChrome: 'visible'
     })
     return univer

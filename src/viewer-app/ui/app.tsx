@@ -450,6 +450,7 @@ export class App {
   public dispose(): void {
     this.univerfileEvents?.close()
     this.worktreeEvents?.close()
+    this.viewer.clearView()
     this.reactRoot?.unmount()
     this.reactRoot = undefined
   }

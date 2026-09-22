@@ -43,6 +43,7 @@ import type {
 } from '../service/types.ts'
 import { UniverError } from '../service/errors.ts'
 import { UNIVER_LICENSE } from '../../workers/unit-content/license.ts'
+import { encodeRenderLicense } from '../../shared/render-license.ts'
 
 type MachineRuntime = UniverPrintPdfRuntime &
   UniverRenderRuntime &
@@ -185,7 +186,11 @@ export class RenderOperations {
       })
       const mode = input.mode ?? 'replace'
       return {
-        code: wrapSlideScript(compiled.code, { page: input.page, mode, ...compiled.viewport }),
+        code: wrapSlideScript(officeSafeSvgCode(compiled.code), {
+          page: input.page,
+          mode,
+          ...compiled.viewport
+        }),
         lints: compiled.lints,
         mode,
         page: input.page,
@@ -203,10 +208,17 @@ export class RenderOperations {
   private async openRuntime(signal?: AbortSignal): Promise<MachineRuntime> {
     try {
       const browserExecutablePath = await resolveBrowserExecutablePath(this.browserExecutablePath)
+      const configuredLicense = process.env.UNIVER_LICENSE?.trim()
+      const configuredPbk = process.env.UNIVER_LICENSE_PBK?.trim()
+      const license = configuredLicense
+        ? configuredPbk
+          ? encodeRenderLicense({ license: configuredLicense, pbk: configuredPbk })
+          : configuredLicense
+        : UNIVER_LICENSE
       return await createUniverRenderRuntime({
         renderPageRoot: RENDER_MACHINE_ROOT,
         env: process.env,
-        license: process.env.UNIVER_LICENSE?.trim() || UNIVER_LICENSE,
+        license,
         ...(browserExecutablePath === undefined ? {} : { browserExecutablePath }),
         ...(signal === undefined ? {} : { signal })
       })
@@ -214,6 +226,18 @@ export class RenderOperations {
       throw renderError(error)
     }
   }
+}
+
+/**
+ * The SVG compiler expresses an absent stroke as zero opacity. OOXML exchange serializes that as
+ * a real line with alpha=0, which Quick Look and some presentation consumers render as a gray
+ * outline. A disabled line is visually equivalent in Univer and portable in exported PPTX files.
+ */
+export function officeSafeSvgCode(code: string): string {
+  return code.replaceAll(
+    '.setStrokeOpacity(0);',
+    '.setStrokeLineType(univerAPI.Enum.ShapeLineTypeEnum.NoLine);'
+  )
 }
 
 /**

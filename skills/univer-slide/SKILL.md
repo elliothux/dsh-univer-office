@@ -16,7 +16,7 @@ Facade page indexes are zero-based (`getSlideByIndex`, `getSlides()[i]`). Tool p
 - Insert or update native charts: reserve the rectangle in the page SVG, then use the direct
   `FSlide` chart methods through `univer_execute`.
 - Verify every changed page: `univer_inspect`, then `univer_lint`, then `univer_screenshot` and inspect the returned PNG.
-- Export only after verification: `univer_export` to `.pptx`.
+- A generic presentation, slide deck, or “PPT” request produces the native `.univer` file only. Call `univer_export` only when the user explicitly requests PowerPoint, `.pptx`, or an Office export. Call `univer_print_pdf` only when the user explicitly requests PDF.
 
 ## Presentation structure
 
@@ -24,9 +24,14 @@ A presentation contains ordered slides. A slide contains elements in bottom-to-t
 
 ## Multi-page deck workflow
 
+Create one hidden deck working directory under the current workspace before authoring, for
+example `.temp/<deck-name>/`. Put `spec.md`, page SVGs, exported resources, screenshots, and
+helper scripts there from the start. `.temp` is working storage and is not a deliverable; only
+the final `.univer` file belongs in the user-visible workspace.
+
 ### 1. Write the page specification
 
-Before drawing, write a workspace `spec.md` precise enough that page generation needs no fresh decisions about copy, palette, or structure. Fix deck-level constants once: `#RRGGBB` colors, font roles in points (`design px × 0.75`), font families, icon/illustration style, and page size.
+Before drawing, write `spec.md` in that deck working directory, precise enough that page generation needs no fresh decisions about copy, palette, or structure. Fix deck-level constants once: `#RRGGBB` colors, font roles in points (`design px × 0.75`), font families, icon/illustration style, and page size. Use one Office-safe installed family per text run (for example `Arial` or `Aptos`), not a CSS font stack or a web-only family: PPTX consumers do not share browser font fallback behavior.
 
 For every page specify:
 
@@ -42,8 +47,8 @@ Adjacent pages should not repeat the same structure. For reconstruction, transcr
 
 Finish page N before authoring page N+1.
 
-1. Prepare this page's local assets and record paths in the spec. For bundled icons, logos, emoji, or illustrations, use `univer_resources` `find` followed by `export` into a workspace resource directory. Copy returned handles exactly, keep a consistent registry/style baseline, and reuse prior exports deliberately. Do not substitute Unicode glyphs or empty placeholders for required visuals.
-2. Hand-author the complete `page-NN.svg` with inline styles and workspace-relative assets. Keep every page SVG through delivery.
+1. Prepare this page's local assets and record paths in the spec. For bundled icons, logos, emoji, or illustrations, use `univer_resources` `find` followed by `export` into the deck working directory. Copy returned handles exactly, keep a consistent registry/style baseline, and reuse prior exports deliberately. Do not substitute Unicode glyphs or empty placeholders for required visuals.
+2. Hand-author the complete `page-NN.svg` with inline styles and working-directory-relative assets. Keep page SVGs under `.temp` while iterating; they are not deliverables.
 3. Call `univer_compile_svg` with explicit `source`, target `file`, draft `worktreeId`, Slide `unitId`, one-based `page`, and default `mode: "replace"`.
 4. Clear every compiler warning. Review every returned lint; retain one only when intentional and justified by evidence.
 5. Call `univer_inspect` for the Slide Unit, then `univer_lint` for page N.
@@ -53,7 +58,7 @@ Never use `mode: "add"` to fix a page. Add overlays the corrected content while 
 
 ### 3. Review the deck
 
-After every page passes its own loop, call `univer_screenshot` for every page and review the returned PNGs in batches of at most five pages. Pass the explicit Slide `pages` and a workspace `output` directory; use `contactSheet: true` only as an additional deck overview, never as the only per-page evidence. Check:
+After every page passes its own loop, call `univer_screenshot` for every page and review the returned PNGs in batches of at most five pages. Pass the explicit Slide `pages` and an output directory under `.temp`; use `contactSheet: true` only as an additional deck overview, never as the only per-page evidence. Check:
 
 1. Elements clipped by or beyond the page.
 2. Text overflowing cards or colored regions.
@@ -68,7 +73,7 @@ Treat each defect as a pattern: search all page SVGs for the same mistake, fix s
 
 ### 4. Deliver
 
-Follow the `univer` ready/status workflow. Provide the `.univer` artifact and `.pptx` export only when requested. Do not merge unless the user explicitly asks.
+Follow the `univer` ready/status workflow. Deliver the `.univer` artifact by default. Export and deliver `.pptx` or PDF only when the user explicitly requested that format. Do not present page SVGs, build scripts, or other working files as deliverables. Do not merge unless the user explicitly asks.
 
 ## SVG is the generation path
 
