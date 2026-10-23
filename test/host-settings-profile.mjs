@@ -33,10 +33,13 @@ try {
     ...Object.keys(manifest.peerDependencies),
     '@deepseek-ai/dsh-config-editor'
   ])
-  for (const name of peers) {
-    if (!name.startsWith('@deepseek-ai/')) continue
-    await symlink(dirname(req.resolve(`${name}/package.json`)), join(dir, 'node_modules', name))
-  }
+  await Promise.all(
+    [...peers]
+      .filter((name) => name.startsWith('@deepseek-ai/'))
+      .map((name) =>
+        symlink(dirname(req.resolve(`${name}/package.json`)), join(dir, 'node_modules', name))
+      )
+  )
   await Promise.all(
     ['libsql', 'puppeteer-core', '@puppeteer', '@univerjs-pro'].map((dep) =>
       symlink(join(repo, 'node_modules', dep), join(dir, 'node_modules', dep))
