@@ -27,9 +27,10 @@
 ## 2. 必须保留的产品功能
 
 - 在 DSH 会话中发现 `.univer` 文件，并为每个文件显示采用统一审阅布局的回合尾部卡片；
-- 全屏动作在 DSH 内以 Viewer 全屏预览文件；
-- worktree 创建或更新后显示 DSH 实时浮动窗口；
-- 用户可在 DSH 插件设置中关闭实时浮动窗口，且不影响回合尾部审阅卡片；
+- 在 DSH 内以 Viewer 全屏预览文件；
+- 在 DSH 文件树中点击 `.univer` 文件即可按需打开 Viewer 预览，不需要任何 Agent 操作，也不要求安装 `dsh-better-sidebar`；该入口在关闭实时浮动窗口后仍然可用，并由 Viewer 提供主线与非终态 worktree 之间的切换；
+- worktree 创建或更新后显示实时浮动窗口；
+- 用户可在 DSH 插件设置中分别关闭实时浮动窗口与会话审阅卡片，且不影响另一者与文件树按需预览；
 - 一个 worktree 改动多个 unit 时，只列出有改动的 unit 并允许切换；
 - draft 或 ready worktree 的 Viewer 可在 View 与 Compare 间切换，把当前 worktree 与固定的 trunk 或另一个活跃 worktree 并排比较，并为 Sheet、Doc、Slide、Base 与 Board 提供语义差异列表、定位和显式刷新；
 - 会话结束后在最近一次操作各 worktree 的回合末尾为 `draft` 或 `ready` worktree 显示嵌入式审阅面板；
@@ -185,7 +186,8 @@ src/
       en.ts
       zh.ts
     settings/
-      live-preview-preference.ts     # Settings scope 的浮窗偏好投影
+      univer-preferences.ts          # 新旧设置接口的展示偏好投影
+      settings-contract.ts           # SettingsScope / ConfigForm 的共享接口
     styles/
       settings.ts
       worktree.ts
@@ -205,6 +207,7 @@ artifacts/                            # gitignored 的发布运行产物
   viewer/                            # 从 viewer-app 生成
   render-machine/                    # 从 render-machine 生成
   gateway.cjs                        # 从 gateway-app 生成
+  upgrade-worker.cjs                 # Windows .univer 升级 helper，从 migration/upgrade-worker 生成
   unit-content-worker.mjs           # 从 workers/unit-content 生成
 test/
   host-smoke.mjs
@@ -286,15 +289,21 @@ Provider 与 Worker 使用 Gateway Supervisor 返回的 loopback origin 访问 G
 Viewer 面由插件挂载在 DSH WebServer origin 上：`/univer-viewer` 前缀承载 Viewer 文档与静态
 资源，`/uf` 前缀承载 Gateway 领域 API，`/univer-viewer/ws` 是 WebSocket 隧道（`?target=` 携带
 动态上游路径，因 DSH upgrade 注册只支持精确路径）。代理逐请求先通过 DSH `connection` 服务的
-信任门（Host/Origin fence 与浏览器鉴权），再执行既有会话范围检查：Viewer 文档请求解码 fileKey
-并验证其落在指定 live session 的 `cwd` 内，然后以 HttpOnly cookie 把浏览器绑定到该会话范围；
-`/uf` 与隧道请求逐请求按 cookie 中的会话重复该校验。`computeFileState` 投影同源相对路径
+信任门（Host/Origin fence 与浏览器鉴权）。Viewer 文档请求仍解码 fileKey 并验证其落在指定
+live session 的 `cwd` 内；后续 `/uf` 与隧道请求不设置或读取插件会话 cookie，也不重复 workspace
+范围校验，以兼容桌面壳删除 Set-Cookie、替换请求 cookie 的转发行为。已通过 DSH 鉴权的浏览器
+可直接调用 Gateway 文件 API，访问范围由 Host 进程的文件权限决定；该契约同样适用于远程部署。
+`/univer-api` 与模型工具保留 session/workspace 校验。`computeFileState` 投影同源相对路径
 `/univer-viewer/?file=<key>`，`/univer-api/state` 在路由层为每个投影 URL 追加 sessionId。
+桌面 Viewer 以 `location.protocol === 'dsh-app:'` 区分运行环境，启动时从受 connection 门保护的
+`/univer-viewer/runtime-config` 获取真实 Host 地址。该地址使用接收 HTTP 请求的 socket 实际监听
+端口生成，不采信客户端 Host/query；Viewer 验证它为 `http://127.0.0.1:<port>`，配置不可用时
+明确失败。协作与生命周期 WS 均连接该 Host 的固定隧道，由桌面壳注入 DSH 认证；普通浏览器
+沿用页面 origin（HTTPS 对应 WSS），不使用 loopback 配置。运行时配置禁止缓存，不包含凭据。
 Gateway 本身始终只监听 loopback，不对外暴露。完整契约见
 `docs/viewer-same-origin-deployment.md`。
 
-嵌入宿主可在创建 Viewer proxy 时提供自己的 Univer `license + pbk`。代理只向已经由 HttpOnly
-scope cookie 绑定到 live session 的浏览器通过 `/univer-viewer/license` 返回该配置，并明确禁止缓存；
+嵌入宿主可在创建 Viewer proxy 时提供自己的 Univer `license + pbk`。代理通过 `/univer-viewer/license` 接收显式的 `file + sessionId`，确认文件属于 live session 后返回该配置，并明确禁止缓存；该路径不依赖插件 scope cookie。
 未配置时返回空响应，直接访问未挂载该端点的 loopback Gateway 时则返回 404；Viewer 在这两种
 情况下使用包内开发 license。Viewer、merge preview 和 Compare 共用同一份启动时加载的 license
 authority，不各自推导或保存副本。
@@ -305,11 +314,15 @@ Gateway 通过 SDK `register(router)` 注册 HTTP/WebSocket Endpoint，连接跟
 
 Viewer Ribbon 的交互式导入导出使用 Gateway 中逐 `.univer` 隔离的 Universer exchange 协议：`source=1` 上传、异步 import/export task、sign-url 与 artifact content。该协议只挂在 trunk 路径；导入在当前 `.univer` trunk 创建新 Unit 并发布结构化 `unit_added` 事件，导出从 trunk head 物化快照。临时 artifact 和 task 有界、可过期，并随文件 runtime 一起释放。嵌入资源继续使用 `source=3` 且按 Unit/worktree 授权，两类文件协议不得混用。docx 导入的兼容模式由 import options 的 `doc.docType`（`traditional`/`modern`）决定：两个导入入口（Unit Content Worker 与该协议）在缺省时都显式解析为 `traditional` 以保留源页面几何，`modern` 是 pageless 语义、会重写页面版面，仅由调用方显式选择；上游 exchange binding 的 serde 缺省值不做兜底依据。
 
-Gateway 还为 trunk revision 组合 Collaboration SDK History Service 与 Endpoint。Gateway 自己在共享 `.univer` connection 上实现 History database adapter；`history@1` 表是可按 Unit 从 core Unit/changeset 重建的派生索引。文件 runtime 启动时先 reconcile 到 trunk head，再开放 SDK transport。Viewer 为 trunk 的 Sheet、Doc、Slide、Base 与 Board 分别注册官方 History UI；只读审阅可检查历史但不能恢复，可编辑 trunk 视图可显式恢复，worktree 与 merge preview 不呈现历史入口。
+Gateway 还为 trunk revision 组合 Collaboration SDK History Service 与 Endpoint。Gateway 自己在共享 `.univer` connection 上实现 History database adapter。`history@2` 不再按 revision 派生：每个 Unit 的每个分段保存一条**分段起始**记录（主键 `(unit_id, start_revision)`），`endRevision` 由下一段的起始 revision 计算、不入库，列表按 `startRevision` 降序并以排他的 `beforeRevision` 分页，`hasMore` 只表示页下方仍存在匹配记录。SDK 1.0.0 移除了旧的逐 revision History 读取与重建 API，因此文件 runtime 启动时不再 reconcile 到 trunk head，SDK transport 直接开放。Viewer 为 trunk 的 Sheet、Doc、Slide、Base 与 Board 分别注册官方 History UI；只读审阅可检查历史但不能恢复，可编辑 trunk 视图可显式恢复，worktree 与 merge preview 不呈现历史入口。
+
+`.univer` 的整体格式由组件版本表与必要表结构共同识别；当前格式为 v3，对应 core=2、worktree=3、assets=1、history=2。v0 为旧表布局，v1/v2 对应升级前的组件组合；未知版本和混合组件组合拒绝打开。正常打开已有文件必须先通过统一升级入口，再构造当前 Adapter；优化操作对输出副本调用同一入口。升级对原文件加锁并备份，在同目录候选文件中完成转换、时间规范化、清理和完整性验证，确认源文件哈希未变后才替换原文件；失败清理候选文件，原文件与备份保持不变。再次打开同一份未变化的文件时复用已有的相同字节备份，不会再写一份新备份。Windows 上 libsql 关闭连接后仍可能占着文件句柄，同一进程里替换会失败，而多个会话卡片会轮询这次失败、每次再留一份备份；因此 Windows 把迁移放在 helper 进程里，等该进程退出后再由持锁的父进程替换原文件。v2→v3 内部按 Core → Worktree → History 转换，前两步读取旧 History 创建信息后才能移除旧表；转换代码归属 `migration/`，Adapter 只负责当前结构。Unit 与 Worktree Unit 的创建身份取自 SDK 的 `creatorID`/`createdAt`，trunk 接入的 Worktree Unit 继承其创建信息；旧记录缺失创建者时使用 `anonymous`，时间优先保留文件内已有信息。新提交的 changeset 由 Adapter 写入服务器提交时间，payload 的 `createTime` 使用 Unix 秒，数据库时间列使用 Unix 毫秒；迁移同步规范化旧 payload，History 读取无需猜测单位。History 迁移保留旧分段边界，并与 SDK 官方迁移有意不同：缺失的 revision 2 起点会补齐，超过 Core head 的起点会丢弃，某个 Unit 的旧 History 无法转换时只清空该 Unit 的 History，不让整个升级失败。
 
 worktree Compare 由 Gateway 创建有界的固定比较会话：右侧始终是路由指定的 draft 或 ready worktree，左侧默认是 trunk，也可选择同一文件中的另一个活跃 worktree。会话在创建时固定两侧 Unit heads，并为每个 Unit 记录 paired、left-only 或 right-only；后续读取只从这些固定 revision 物化最终 snapshot 与 changeset，不随 live head 漂移。Gateway 使用同版本 Univer Pro History 计算产品语义差异，并通过 `/diff` 返回带版本号、分页、筛选、稳定实体身份与产品定位信息的 JSON；新增或删除的整 Unit 使用镜像空侧的 snapshot 比较。任一 live head 变化只把结果标记为 stale，Viewer 必须由用户显式刷新以创建新会话。
 
-它不得复用或终止外部启动的 Gateway。内置 Gateway 默认从 `9080` 启动，端口被占用时逐次加一；只有结构化确认端口占用时才能继续尝试下一端口，其他启动失败必须立即返回。健康检查需要验证 Viewer 身份，不能把任意返回 HTTP 200 的本地服务误认为 Gateway。
+merge preview 只对 `ready` worktree 开放。Gateway 调用 Collaboration SDK `evaluateWorktreeUnitMerge`：主干已前进且 OT 成功时，返回把冻结 draft mutations 变到当前 trunk head 后的静态 snapshot；主干未前进，或 Unit 是 worktree 内新建时，改为物化该 worktree head。冲突、已合入和已删除的 Unit 返回错误，不用草稿冒充合并结果。HTTP 返回完整 snapshot；其中的 Sheet blocks 一并返回，Sheet 与 Base 会带上，Doc、Slide、Board 省略。Viewer 只还原引擎数据，并在 Sheet 加载后计算公式。计算超时或触发失败时仍展示已物化的 snapshot，不解析或重放协同 mutation。
+
+插件启动的内置 Gateway 不得复用或终止外部启动的 Gateway。它默认从 `9080` 启动，端口被占用时逐次加一；只有结构化确认端口占用时才能继续尝试下一端口，其他启动失败必须立即返回。健康检查需要验证 Viewer 身份，不能把任意返回 HTTP 200 的本地服务误认为 Gateway。
 
 ## 8. webServer Consumer 与浏览器协议
 
@@ -322,7 +335,8 @@ webServer Consumer 使用 DSH `webServer` 的 prefix route 注册 `/univer-api`�
 
 路径是浏览器协议，不等同于 Service 方法。Router 负责 HTTP method、请求体大小、JSON 和字段校验，route handler 只把已验证请求映射为服务调用。错误返回稳定的错误 code 和可显示消息，不把堆栈、绝对内部资源路径或子进程输出原样暴露给浏览器。
 
-worktree 修改审阅操作必须绑定当前 DSH 会话及其 workspace scope，不能只凭浏览器提交的绝对路径授权。
+`/univer-api/worktree-action` 必须绑定当前 DSH 会话及其 workspace scope，不能只凭浏览器提交的
+绝对路径授权。Viewer 内置操作走已通过 DSH 鉴权的 `/uf`，不额外绑定会话范围。
 
 ## 9. Tools Consumer
 
@@ -355,13 +369,26 @@ Client 只解析结构化 `univer_*` 工具事件，不从 bash 命令或自由�
 
 Client 是状态投影，不拥有 worktree 真相。预览目标来自可回放的会话事件；实时状态来自 Host API；Viewer iframe 负责文档内容的实时展示。
 
+审阅卡片平时使用文档流中的非模态 dialog，全屏时通过 `showModal()` 进入浏览器 top layer，避免对话祖先的 containment、transform 或裁剪限制。切换不迁移 DOM 或重载 Viewer iframe，原位置保留等高占位；退出或卸载时撤销模态状态与键盘监听。Esc 同时监听 Host 与同源 Viewer，已被 Viewer 消费的按键不用于退出全屏。
+
 Viewer 内的 Compare 是 Gateway 的只读 Consumer，不扩大 Client 权限。DSH Client 仍只投影 Host 授权后的不透明 Viewer URL；Viewer 使用该 URL 已绑定的文件和 worktree 创建固定比较会话，并把同一个 `/diff` 语义结果交给差异列表、双栏渲染和定位行为。
 
 Client 通过 `univerTurnDefinition` 按 `callId` 配对结构化工具调用与结果，并分别归约生命周期、内容写入和读取操作；读取操作不能覆盖同一 Turn 已完成的 ready、reopen、merge 或 discard 转换。统一回合卡片把该投影与 Host `FileState` 组合，按权威状态打开 trunk、worktree 或 merge preview 完整页面；若 Host 明确确认投影中的文件已不存在，则不渲染该卡片，以覆盖 Agent 在同一 Turn 中创建并通过其他工具删除临时文件的场景。
 
 实时浮窗只由 `univer_new`、worktree create/reopen/ready 和内容写入主动拉起，纯 status、inspect、lint、screenshot、print-pdf 与 export 不主动打开窗口。用户保持打开的文件或非终态 worktree 会在下一 Turn 继续显示；用户关闭优先，merged 与 discarded 清除打开意图。
 
-`univer-office` Settings 命名空间拥有 `autoOpenLivePreview` 用户偏好，默认开启且实时生效。Settings 服务或对应 Client 设置表面缺席时，Client 保持默认开启，不让可选设置能力阻塞预览与审阅注册；关闭该偏好只移除实时浮窗及其轮询，回合尾部审阅投影不受影响。
+展示配置按运行时能力兼容两种 DSH 契约：旧版 Host 使用 `settings.register` 注册 `univer-office` 命名空间，Client 通过 `settingsScope.bind` 订阅；0.1.7-alpha.1 起 Host 从根插件 `Config` 的 `volatile` 字段派生表单，Client 通过 `configForms.get` 读取 bundle patch 拥有的 `univer` entry。该 entry id 必须与 `cordis.patch.yml` 一致。Host schema 使用序列化的 `volatile` metadata，兼容没有 `.volatile()` builder 的旧 schemastery；新版 Host 不再调用已移除的 `settings.register`。Client 共享最小读写接口，处理新版写入返回 `false` 和网络异常，保存失败时保留 draft 并恢复保存按钮。旧版独立设置文档与新版 profile 存储不同，本插件不迁移旧配置；升级后可能需要重新设置偏好。
+
+两种契约均拥有两个相互独立的布尔偏好，默认均开启且实时生效：`autoOpenLivePreview` 控制实时浮窗及其轮询，`conversationReviewCards` 控制回合尾部审阅卡片是否渲染。Settings 服务或对应 Client 设置表面缺席时，Client 保持默认开启，不让可选设置能力阻塞预览与审阅注册；任一偏好关闭只移除它自己的表面，不影响另一者，也不影响文件树按需预览。偏好投影把 `loading` 解析为全关，避免被关闭的表面在持久值到达前闪现；而设置文档加载失败时保持产品默认，因为「读不到设置」不是用户的决定。设置卡片的一份 draft 按字段累计、一次保存提交，因此两个开关可以分别覆盖与恢复默认。
+
+文件树按需预览是浮窗之外的第二条入口：它不由任何 `univer_*` 操作触发，而是让 `.univer` 地址交给 Viewer 渲染。DSH 右栏按地址认领标签类型，排序规则是**档位（`extension` > `builtin` > `fallback`）→ 命中模式字符串长度 → 注册顺序**，因此本插件按宿主形态注册两条路径，任一时刻只有一条生效：
+
+- **DSH 原生右栏**：`ctx.sidebarRightTabs.register` 注册自己的 tab 类型（自有 kind、`patterns: ['*.univer']`、`extension` 档、`canOpen` 只接受 session 作用域地址），正文注册在 keyed seat `sidebar.right.pane.tab`，通过 `useTabInfo().tab.contentId` 取得资源地址。地址语法（`dsh-resource://file/…`）由本包镜像实现：客户端 bundle 的 purity gate 禁止 value-import 未列出的 `@deepseek-ai/*` 包，生态做法同样是本地镜像。
+- **`dsh-better-sidebar`（可选）**：该插件以自有 editor 类型在**同档**用整地址模式 `dsh-resource://file/**` 接管文件地址。同档比模式长度，它的模式更长，所以在它存在时永远赢下 claim，地址进入它的 `matchFileViewer` 注册表；本插件因此在那里注册文件预览器（`fetchStrategy: 'none'`，声明 `.univer` 扩展名）。若缺这条注册，`.univer` 会落到它的 catch-all code viewer，即二进制当文本渲染。
+
+两条路径互不依赖：没有 `sidebarRightTabs` 时原生注册被跳过，没有 `betterSidebar` 时预览器注册被跳过，两者都不阻塞其余 Client 表面。两条路径共用同一个预览正文组件，因此加载态、Host 明确确认文件不存在、Gateway 未运行、Viewer 目标解析只实现一次。预览器声明 `fetchStrategy: 'none'`，因为 `.univer` 是二进制容器：任何按字节读取的策略都会落到通用下载面板，而 Viewer URL 只能由 Host 授权后投影。它复用回合卡片的同一份 `FileState` 轮询解析 Viewer 目标，以主线 URL 打开完整 Viewer，版本切换与 worktree 审阅统一由 Viewer 管理，外层不再维护版本选择或重复提供切换控件。完整 Viewer 首次打开未指定 worktree 或 Unit 的文件链接时，若主线没有 Unit，则按 worktree 列表顺序进入第一个 draft 或 ready worktree；没有活跃 worktree 时保留空状态，显式目标与 embedded scope 不受此默认导航影响；`useGatewayStatus` 额外暴露 Gateway 阶段，使未运行的 Gateway 变成可操作的启动入口而不是永久加载态。
+
+Client 显式注入 `uiConversation` 后才注册回合定义；旧版 `settingsScope` 与新版 `configForms` 作为可选子 fiber 注入。缺少任一设置服务不得阻塞主 Client 激活，迟加载后订阅偏好，卸载时撤销订阅。
 
 Client 必须满足：
 

@@ -29,6 +29,7 @@ pnpm run update:univer-sdk --sdk_version <exact-version>
 - `format` and `format:check` are repository-wide. Do not create unrelated formatting churn. For a narrow change, check supported files directly with `pnpm exec oxfmt --check <files>`.
 - `pnpm run build` builds Host/Client, Worker, Gateway, Render Machine, and Viewer. Use `build:lib`, `build:worker`, `build:gateway`, `build:render`, or `build:viewer` for a narrower build.
 - `pnpm run update:univer-sdk` re-pins the Univer SDK cohort to one exact version in every manifest, leaves self-versioned packages untouched, strips any transitive binding declarations (the wrappers own those versions), and drops SDK entries from `pnpm-workspace.yaml` overrides; run `pnpm install` and the full build afterwards.
+- Before any cohort version change, read the Collaboration SDK migration notes for the target version; they live in a private repository that the configured GitHub credentials already reach, so ask for the location instead of recording a link here. Those notes are authoritative for the component schema versions the Gateway adapters own, so a version bump is only complete once the adapters and `src/gateway-app/univerfile-sqlite/migration/` match them.
 - Smoke tests consume `lib/` and `artifacts/`. Always build the affected target from the current source before running its smoke test.
 
 Choose the narrowest validation that proves the change:
@@ -39,11 +40,19 @@ Choose the narrowest validation that proves the change:
 | DSH Client                                                                                    | `pnpm run build:lib`             | `pnpm run test:client`                                          |
 | Bundled skills                                                                                | None                             | `pnpm run test:skills`                                          |
 | Product telemetry or lifecycle packaging                                                      | `pnpm run build:lib`             | `pnpm run test:telemetry`                                       |
-| Viewer UI                                                                                     | `pnpm run build:viewer`          | Add `test:integration` when behavior crosses a process boundary |
+| Viewer UI                                                                                     | `pnpm run build:viewer`          | `pnpm run test:preview-formula`; add `test:integration` when behavior crosses a process boundary |
 | Gateway, Worker, persistence, worktree lifecycle, Render Machine, or a cross-process protocol | Build every affected application | `pnpm run test:integration`                                     |
 | Cross-layer or release change                                                                 | None separately                  | `pnpm test` (builds every target first)                         |
 
+For DSH compatibility changes, build `lib/` first, then use an independently installed target DSH package: `UNIVER_DSH_RUNTIME_ROOT=/absolute/path/to/dsh pnpm run test:client` checks its Cordis lifecycle, and `UNIVER_DSH_RUNTIME_ROOT=/absolute/path/to/dsh node test/host-settings-profile.mjs` checks real Profile settings in a temporary deployment. The latter checks live updates and persistence across restarts.
+
 Run `pnpm run typecheck` for TypeScript changes and `git diff --check` before every handoff. Report the exact commands that completed successfully.
+
+`pnpm run typecheck` does not cover `src/gateway-app/**`: the root `tsconfig.json` excludes it and `tsconfig.viewer.json` includes only its `contract/`. Gateway type errors therefore surface in the smoke tests rather than in the typecheck, so treat `pnpm run build:gateway` plus `pnpm run test:integration` as the Gateway type gate. A relative import that omits its file extension (`from './univerfile-sqlite'`) resolves at runtime but makes every type it re-exports `any`, which silently disables checking at the call sites; always write the explicit `.ts`/`.js` path this repository otherwise requires.
+
+For `.univer` schema or migration changes, also run `pnpm run test:migration`. This source-level regression suite checks legacy files, atomic replacement, failure cleanup, concurrent opens, optimization, and History readback.
+
+For review-panel layout changes, also run `pnpm run test:client:layout`. This source-level browser test uses the installed render browser to check containment, fullscreen, iframe continuity, and cleanup; it supplements the built Client smoke test.
 
 ## 3. Architecture and Cordis boundaries
 
@@ -70,8 +79,8 @@ Run `pnpm run typecheck` for TypeScript changes and `git diff --check` before ev
 
 - Content writes require an explicit `draft` worktree. `ready` and `reopen` are normal agent operations. `merge` and `discard` require an explicit user request plus DSH approval and must never be automatic cleanup.
 - `merged` and `discarded` are terminal. Preserve their historical review projection, but remove live windows and mutation controls.
-- Bind every browser query and mutation to both the DSH session and workspace scope. Caches, polling, window deduplication, and review state must never leak across sessions.
-- Authorize every file, import, export, screenshot output, and SVG resource against the explicit tool/session workspace, then verify it again with `realpath` at the Provider boundary. A shared Gateway process does not grant shared file access.
+- Bind `/univer-api` browser queries and mutations, Viewer document opens, caches, polling, window deduplication, and review state to the DSH session and workspace scope. Viewer `/uf` requests and WebSocket tunnels rely on DSH connection authentication without a plugin scope cookie; authenticated browsers may address any `.univer` file accessible to the Host process.
+- Authorize Provider file operations, imports, exports, screenshot output, and SVG resources against the explicit tool/session workspace, then verify them again with `realpath` at the Provider boundary. Gateway process reuse does not broaden Provider access; the authenticated Viewer `/uf` surface follows the separate browser contract above.
 - Concurrent Gateway starts share one startup operation. Failure, early exit, and unload must clear ownership and allow retry. Stop only subprocesses started by this plugin, skip occupied ports, and verify the health endpoint identity.
 - Cancellation and teardown must reach quiescence: reject new notifications, abort or kill owned work, and await Worker, browser, and subprocess exit. One clear owner manages settlement and cleanup for each asynchronous operation.
 - `univer_screenshot` may return model-visible PNG attachments only when the current model supports image input and every output path is authorized. Claim visual verification only for images actually inspected; structural readback and Slide lint are not pixel-level proof.

@@ -10,13 +10,16 @@ import {
 export const name = 'univer-settings'
 
 const SettingsSchema: z<UniverSettings> = z.object({
-  autoOpenLivePreview: z.boolean().default(true)
+  autoOpenLivePreview: z.boolean().default(true),
+  conversationReviewCards: z.boolean().default(true)
 })
 
 /** Expose presentation preferences when the active DSH composition provides Settings. */
 export function apply(ctx: Context): void {
   ctx.inject(['settings'], (settingsCtx: Context) => {
     const settings: SettingsProvider = settingsCtx.settings
+    // DSH 0.1.7+ derives forms from the root plugin's live Config instead.
+    if (typeof settings.register !== 'function') return
     settings.register(UNIVER_SETTINGS_NAMESPACE, SettingsSchema, {
       base: DEFAULT_UNIVER_SETTINGS,
       applies: 'live'

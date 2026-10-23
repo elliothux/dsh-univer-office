@@ -215,7 +215,29 @@ try {
     if (gatedDocument.status !== 401) {
       throw new Error(`connection fence must gate the Viewer proxy: ${gatedDocument.status}`)
     }
+    const gatedConfig = await fetch(`${proxyOrigin}/univer-viewer/runtime-config`)
+    if (gatedConfig.status !== 401) {
+      throw new Error(`connection fence must gate Viewer transport config: ${gatedConfig.status}`)
+    }
     gateRejection = undefined
+
+    const transportConfig = await fetch(`${proxyOrigin}/univer-viewer/runtime-config`)
+    const transport = await transportConfig.json()
+    if (
+      !transportConfig.ok ||
+      transport.desktopStreamBaseUrl !== proxyOrigin ||
+      transportConfig.headers.get('cache-control') !== 'no-store'
+    ) {
+      throw new Error(
+        'Viewer transport config must return the actual dynamic Host port without caching'
+      )
+    }
+    const configMutation = await fetch(`${proxyOrigin}/univer-viewer/runtime-config`, {
+      method: 'POST'
+    })
+    if (configMutation.status !== 405) {
+      throw new Error('Viewer transport config must reject mutations')
+    }
 
     const unscopedDocument = await fetch(`${proxyOrigin}/univer-viewer/?file=${proxyFileKey}`)
     if (unscopedDocument.status !== 403) {
@@ -239,11 +261,8 @@ try {
     if (!document.ok || !documentHtml.includes('<html')) {
       throw new Error(`scoped Viewer document was not proxied: ${document.status}`)
     }
-    const scopeCookie = (document.headers.get('set-cookie') ?? '').split(';')[0]
-    if (!scopeCookie.startsWith('univer-viewer-sessions=')) {
-      throw new Error(
-        `Viewer document did not bind the session scope: ${document.headers.get('set-cookie')}`
-      )
+    if (document.headers.get('set-cookie') !== null) {
+      throw new Error('Viewer document must not set a plugin session cookie')
     }
     const unscopedLicense = await fetch(`${proxyOrigin}/univer-viewer/license`)
     if (unscopedLicense.status !== 403) {
@@ -251,9 +270,14 @@ try {
         `Viewer license without a live scope must be refused: ${unscopedLicense.status}`
       )
     }
-    const licenseResponse = await fetch(`${proxyOrigin}/univer-viewer/license`, {
-      headers: { cookie: scopeCookie }
-    })
+    const foreignLicense = await fetch(
+      `${proxyOrigin}/univer-viewer/license?file=${proxyFileKey}&sessionId=foreign-session`
+    )
+    if (foreignLicense.status !== 403)
+      throw new Error('Viewer license must reject a foreign session')
+    const licenseResponse = await fetch(
+      `${proxyOrigin}/univer-viewer/license?file=${proxyFileKey}&sessionId=${PROXY_SESSION}`
+    )
     if (
       !licenseResponse.ok ||
       JSON.stringify(await licenseResponse.json()) !==
@@ -274,32 +298,40 @@ try {
     }
 
     const ufBase = `${proxyOrigin}/uf/${proxyFileKey}`
-    const unscopedApi = await fetch(`${ufBase}/worktrees`)
-    if (unscopedApi.status !== 403) {
-      throw new Error(`/uf without a bound session must be refused: ${unscopedApi.status}`)
+    // Desktop forwarding retains only DSH authentication cookies. Legacy scope cookies must
+    // neither be required nor affect the Gateway surface, including the startup descriptor.
+    for (const cookie of [
+      undefined,
+      'dsh-auth-probe=desktop-owned',
+      'univer-viewer-sessions=foreign-session',
+      'univer-viewer-sessions=%zz'
+    ]) {
+      const headers = cookie === undefined ? {} : { cookie }
+      const api = await fetch(`${ufBase}/worktrees`, { headers })
+      if (!api.ok || !Array.isArray((await api.json()).worktrees)) {
+        throw new Error(`/uf must work without a scope cookie: ${api.status}`)
+      }
+      const descriptor = await fetch(ufBase, {
+        headers: { ...headers, accept: 'application/vnd.univer.collab-gateway+json;v=1' }
+      })
+      if (!descriptor.ok || (await descriptor.json()).protocolVersion !== 1) {
+        throw new Error(`Gateway descriptor must work without a scope cookie: ${descriptor.status}`)
+      }
     }
-    const foreignApi = await fetch(`${ufBase}/worktrees`, {
-      headers: { cookie: 'univer-viewer-sessions=foreign-session' }
-    })
-    if (foreignApi.status !== 403) {
-      throw new Error(`/uf outside the bound session scope must be refused: ${foreignApi.status}`)
+    for (const rejection of [401, 403]) {
+      gateRejection = rejection
+      const gatedApi = await fetch(`${ufBase}/worktrees`)
+      if (gatedApi.status !== rejection) {
+        throw new Error(`DSH connection fence must still gate /uf: ${gatedApi.status}`)
+      }
     }
-    const malformedApi = await fetch(`${ufBase}/worktrees`, {
-      headers: { cookie: 'univer-viewer-sessions=%zz' }
-    })
-    if (malformedApi.status !== 403) {
-      throw new Error(`malformed scope cookie must fail closed: ${malformedApi.status}`)
-    }
-    const scopedApi = await fetch(`${ufBase}/worktrees`, { headers: { cookie: scopeCookie } })
-    if (!scopedApi.ok) {
-      throw new Error(`scoped /uf request failed: ${scopedApi.status} ${await scopedApi.text()}`)
-    }
+    gateRejection = undefined
 
     const { WebSocket } = await import('ws')
+    let proxyMutation
     const tunnelFrame = await new Promise((resolve, reject) => {
       const client = new WebSocket(
-        `${proxyOrigin}/univer-viewer/ws?target=${encodeURIComponent(`/uf/${proxyFileKey}/events`)}`,
-        { headers: { cookie: scopeCookie } }
+        `${proxyOrigin}/univer-viewer/ws?target=${encodeURIComponent(`/uf/${proxyFileKey}/events`)}`
       )
       const timer = setTimeout(() => {
         client.terminate()
@@ -316,13 +348,19 @@ try {
       client.on('open', () => {
         // Let the Gateway finish registering the socket in its event hub before triggering.
         setTimeout(() => {
-          service
-            .worktree({ ...scoped, action: 'create', name: 'proxy event smoke' })
-            .then(() => undefined)
-            .catch((error) => {
-              clearTimeout(timer)
-              reject(error)
-            })
+          proxyMutation = fetch(`${ufBase}/worktrees`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ name: 'proxy event smoke' })
+          }).then(async (response) => {
+            if (!response.ok || (await response.json()).error?.code !== 1) {
+              throw new Error(`cookie-free worktree creation failed: ${response.status}`)
+            }
+          })
+          void proxyMutation.catch((error) => {
+            clearTimeout(timer)
+            reject(error)
+          })
         }, 100)
       })
       client.on('message', (data) => {
@@ -337,37 +375,44 @@ try {
     if (typeof tunneledWorktreeId !== 'string') {
       throw new Error(`tunneled lifecycle frame was malformed: ${JSON.stringify(tunnelFrame)}`)
     }
-    const refusedTunnel = await new Promise((resolve) => {
-      const client = new WebSocket(
-        `${proxyOrigin}/univer-viewer/ws?target=${encodeURIComponent(`/uf/${proxyFileKey}/events`)}`
-      )
-      client.on('unexpected-response', (_req, response) => {
-        resolve(response.statusCode)
-      })
-      client.on('open', () => {
-        client.terminate()
-        resolve('opened')
-      })
-      client.on('error', () => resolve('error'))
-    })
-    if (refusedTunnel !== 403) {
-      throw new Error(`tunnel without a bound session must be refused: ${String(refusedTunnel)}`)
+    await proxyMutation
+    const persisted = await service.status(scoped)
+    if (
+      !persisted.result?.worktrees?.some((worktree) => worktree.worktreeId === tunneledWorktreeId)
+    ) {
+      throw new Error('cookie-free Gateway mutation must persist the worktree')
     }
-    const malformedTunnel = await new Promise((resolve) => {
-      const client = new WebSocket(
-        `${proxyOrigin}/univer-viewer/ws?target=${encodeURIComponent(`/uf/${proxyFileKey}/events`)}`,
-        { headers: { cookie: 'univer-viewer-sessions=%zz' } }
-      )
-      client.on('unexpected-response', (_req, response) => resolve(response.statusCode))
-      client.on('open', () => {
-        client.terminate()
-        resolve('opened')
+    for (const rejection of [401, 403]) {
+      gateRejection = rejection
+      const refusedTunnel = await new Promise((resolve, reject) => {
+        const client = new WebSocket(
+          `${proxyOrigin}/univer-viewer/ws?target=${encodeURIComponent(`/uf/${proxyFileKey}/events`)}`
+        )
+        const timer = setTimeout(() => {
+          client.terminate()
+          reject(new Error('DSH connection fence did not settle the tunnel upgrade'))
+        }, 10_000)
+        client.on('unexpected-response', (_req, response) => {
+          clearTimeout(timer)
+          response.resume()
+          client.terminate()
+          resolve(response.statusCode)
+        })
+        client.on('open', () => {
+          clearTimeout(timer)
+          client.terminate()
+          resolve('opened')
+        })
+        client.on('error', () => {
+          clearTimeout(timer)
+          resolve('error')
+        })
       })
-      client.on('error', () => resolve('error'))
-    })
-    if (malformedTunnel !== 403) {
-      throw new Error(`tunnel with a malformed cookie must fail closed: ${String(malformedTunnel)}`)
+      if (refusedTunnel !== rejection) {
+        throw new Error(`DSH connection fence must still gate the tunnel: ${String(refusedTunnel)}`)
+      }
     }
+    gateRejection = undefined
 
     // The comb endpoint authenticates each upgrade with a one-time query parameter the client
     // appends to the tunneled URL, then speaks TEXT frames; the tunnel must relay endpoint
@@ -375,8 +420,7 @@ try {
     // after opening (issue #76). A full HELLO round trip proves both, and the same upgrade
     // without the parameter is the differential control.
     const ticketResponse = await fetch(
-      `${ufBase}/worktrees/${tunneledWorktreeId}/universer-api/user/session-ticket`,
-      { headers: { cookie: scopeCookie } }
+      `${ufBase}/worktrees/${tunneledWorktreeId}/universer-api/user/session-ticket`
     )
     if (!ticketResponse.ok) {
       throw new Error(`session ticket request failed: ${ticketResponse.status}`)
@@ -392,8 +436,7 @@ try {
       )
     const memberID = await new Promise((resolve, reject) => {
       const client = new WebSocket(
-        `${combTunnelBase}&sessionTicket=${encodeURIComponent(ticketBody.ticket)}`,
-        { headers: { cookie: scopeCookie } }
+        `${combTunnelBase}&sessionTicket=${encodeURIComponent(ticketBody.ticket)}`
       )
       const timer = setTimeout(() => {
         client.terminate()
@@ -420,7 +463,7 @@ try {
       throw new Error(`comb HELLO through the tunnel carried no memberID: ${String(memberID)}`)
     }
     const anonymousHold = await new Promise((resolve) => {
-      const client = new WebSocket(combTunnelBase, { headers: { cookie: scopeCookie } })
+      const client = new WebSocket(combTunnelBase)
       const timer = setTimeout(() => {
         client.terminate()
         resolve('held open')
@@ -437,8 +480,7 @@ try {
 
     const disposedClosed = await new Promise((resolve, reject) => {
       const client = new WebSocket(
-        `${proxyOrigin}/univer-viewer/ws?target=${encodeURIComponent(`/uf/${proxyFileKey}/events`)}`,
-        { headers: { cookie: scopeCookie } }
+        `${proxyOrigin}/univer-viewer/ws?target=${encodeURIComponent(`/uf/${proxyFileKey}/events`)}`
       )
       const timer = setTimeout(() => {
         client.terminate()
@@ -1195,6 +1237,51 @@ try {
   if (comparisonEdit.result?.committed !== true || comparisonEdit.result?.value !== 'compared') {
     throw new Error(`comparison edit failed: ${JSON.stringify(comparisonEdit)}`)
   }
+  const baseEdit = await service.executeUnitContent({
+    ...scoped,
+    worktreeId: comparisonWorktreeId,
+    unitId: baseUnitId,
+    code: 'const table = base.getTableById("table-1"); if (!table) throw new Error("missing table"); const records = table.addRecords([{ values: { [table.getPrimaryFieldId()]: "preview record" } }]); return records.length;'
+  })
+  if (baseEdit.result?.committed !== true || baseEdit.result?.value !== 1) {
+    throw new Error(`base preview edit failed: ${JSON.stringify(baseEdit)}`)
+  }
+  const trunkAdvance = await service.worktree({
+    ...scoped,
+    action: 'create',
+    name: 'trunk advance'
+  })
+  const trunkAdvanceId = trunkAdvance.result?.worktreeId
+  if (typeof trunkAdvanceId !== 'string') {
+    throw new Error(`trunk advance worktree failed: ${JSON.stringify(trunkAdvance)}`)
+  }
+  const trunkEdit = await service.executeUnitContent({
+    ...scoped,
+    worktreeId: trunkAdvanceId,
+    unitId,
+    code: 'workbook.getActiveSheet().getRange("E5").setValue("trunk advance"); return "advanced";'
+  })
+  if (trunkEdit.result?.committed !== true || trunkEdit.result?.value !== 'advanced') {
+    throw new Error(`trunk advance edit failed: ${JSON.stringify(trunkEdit)}`)
+  }
+  await expectTransition(trunkAdvanceId, 'ready', 'ready')
+  await expectTransition(trunkAdvanceId, 'merge', 'merged')
+  await expectTransition(comparisonWorktreeId, 'ready', 'ready')
+  await assertMaterializedPreview(origin, gatewayKey, comparisonWorktreeId, unitId, {
+    label: 'Sheet merge preview',
+    blocks: 'required',
+    texts: ['worktree diff', 'trunk advance']
+  })
+  await assertMaterializedPreview(origin, gatewayKey, comparisonWorktreeId, baseUnitId, {
+    label: 'Base merge preview',
+    blocks: 'required',
+    texts: ['preview record']
+  })
+  await assertMaterializedPreview(origin, gatewayKey, comparisonWorktreeId, docUnitId, {
+    label: 'Doc merge preview',
+    blocks: 'absent'
+  })
+  await expectTransition(comparisonWorktreeId, 'reopen', 'draft')
   const pinnedComparison = await verifyWorktreeComparison(
     origin,
     gatewayKey,
@@ -1518,6 +1605,43 @@ async function fetchHistoryChangesets(exchangeBase, unitId, startRevision, endRe
   return response.json()
 }
 
+async function assertMaterializedPreview(origin, gatewayKey, worktreeId, unitId, expectation) {
+  const response = await fetch(
+    `${origin}/uf/${gatewayKey}/worktrees/${encodeURIComponent(worktreeId)}/preview/units/${encodeURIComponent(unitId)}`
+  )
+  const preview = await response.json()
+  const referenced = referencedSheetBlockIds(preview.snapshot)
+  const returned = new Set(
+    Array.isArray(preview.sheetBlocks) ? preview.sheetBlocks.map((block) => block?.id) : []
+  )
+  const missing = referenced.filter((id) => !returned.has(id))
+  const blocks = preview.sheetBlocks
+  const rendered = JSON.stringify({ snapshot: preview.snapshot, blocks })
+  const texts = expectation.texts ?? []
+  const missingText = texts.find((text) => !rendered.includes(text))
+  if (
+    preview.error?.code !== 1 ||
+    preview.snapshot?.unitID !== unitId ||
+    'changesets' in preview ||
+    missing.length > 0 ||
+    (expectation.blocks === 'required' && (!Array.isArray(blocks) || blocks.length === 0)) ||
+    (expectation.blocks === 'absent' && blocks !== undefined) ||
+    missingText !== undefined
+  ) {
+    throw new Error(
+      `${expectation.label} did not return the evaluated preview: ${JSON.stringify(preview)}`
+    )
+  }
+}
+
+function referencedSheetBlockIds(snapshot) {
+  const blockMeta = snapshot?.workbook?.blockMeta
+  if (blockMeta === null || typeof blockMeta !== 'object') return []
+  return Object.values(blockMeta).flatMap((meta) =>
+    Array.isArray(meta?.blocks) ? meta.blocks : []
+  )
+}
+
 async function verifyWorktreeComparison(viewerOrigin, gatewayKey, worktreeId, unitId) {
   const comparisonBase = `${viewerOrigin}/uf/${gatewayKey}/worktrees/${encodeURIComponent(worktreeId)}/comparisons`
   const session = await postJson(comparisonBase, { left: { kind: 'trunk' } })
@@ -1687,7 +1811,7 @@ async function verifyViewerWorktreeComparison(browser, viewerOrigin, gatewayKey,
     )
     for (const width of [1440, 1130, 960, 800, 680, 560, 480]) {
       await page.setViewport({ width, height: 720, deviceScaleFactor: 1 })
-      const layout = await measureWorktreeTopbar(page)
+      const layout = await measureWorktreeTopbar(page, width)
       if (
         layout.overflow ||
         layout.overlap ||
@@ -1706,6 +1830,21 @@ async function verifyViewerWorktreeComparison(browser, viewerOrigin, gatewayKey,
     await page.click(compareToggle)
     await page.waitForSelector('[data-unit-comparison-viewer="true"]')
     await page.waitForSelector('[data-testid="comparison-source-title"]')
+    // Scroll sync can run after the comparison shell mounts, once a pane viewport scrolls
+    // and the peer sheet has not reached Rendered yet. Stay past that window.
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
+    const survivor = await page.evaluate(() => ({
+      appChildren: document.getElementById('app')?.childElementCount ?? 0,
+      comparison: document.querySelector('[data-unit-comparison-viewer="true"]') !== null
+    }))
+    const scrollCrash = browserMessages.find(
+      (message) => message.startsWith('pageerror:') && message.includes('[redi]:')
+    )
+    if (survivor.appChildren === 0 || !survivor.comparison || scrollCrash !== undefined) {
+      throw new Error(
+        `Compare cleared the viewer: ${JSON.stringify(survivor)}; crash=${String(scrollCrash)}`
+      )
+    }
   } catch (error) {
     const state = await page.evaluate(() => ({
       bodyText: document.body.innerText.slice(0, 2_000),
@@ -1723,53 +1862,70 @@ async function verifyViewerWorktreeComparison(browser, viewerOrigin, gatewayKey,
   }
 }
 
-async function measureWorktreeTopbar(page) {
-  return page.evaluate(async () => {
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-    const topbar = document.querySelector('.topbar')
-    const title = document.querySelector('[data-testid="worktree-title"]')
-    const switcher = document.querySelector('[data-testid="view-diff-center"]')
-    const actions = document.querySelector('[data-testid="worktree-actions"]')
-    if (topbar === null || title === null || switcher === null || actions === null) {
-      throw new Error('worktree topbar controls are missing')
+async function measureWorktreeTopbar(page, width) {
+  return page.evaluate(async (width) => {
+    const measure = () => {
+      const topbar = document.querySelector('.topbar')
+      const title = document.querySelector('[data-testid="worktree-title"]')
+      const switcher = document.querySelector('[data-testid="view-diff-center"]')
+      const actions = document.querySelector('[data-testid="worktree-actions"]')
+      if (topbar === null || title === null || switcher === null || actions === null) {
+        throw new Error('worktree topbar controls are missing')
+      }
+      const topbarRect = topbar.getBoundingClientRect()
+      const titleRect = title.getBoundingClientRect()
+      const switcherRect = switcher.getBoundingClientRect()
+      const actionsRect = actions.getBoundingClientRect()
+      const outside = (rect) => rect.left < topbarRect.left - 1 || rect.right > topbarRect.right + 1
+      const controls = [...topbar.querySelectorAll('button')].map((element) =>
+        element.getBoundingClientRect()
+      )
+      const preview = topbar.querySelector('[data-header-preview]')?.getBoundingClientRect()
+      return {
+        centerOffset:
+          switcherRect.left + switcherRect.width / 2 - topbarRect.left - topbarRect.width / 2,
+        previewAboveView:
+          preview !== undefined &&
+          preview.top + preview.height / 2 < switcherRect.top + switcherRect.height / 2 - 1,
+        overlap: controls.some((a, i) =>
+          controls
+            .slice(i + 1)
+            .some(
+              (b) =>
+                Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 &&
+                Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1
+            )
+        ),
+        actionsHeight: actionsRect.height,
+        actionsTop: actionsRect.top,
+        height: topbarRect.height,
+        overflow:
+          document.documentElement.scrollWidth > document.documentElement.clientWidth ||
+          [titleRect, switcherRect, actionsRect, ...controls].some(outside),
+        switcherHeight: switcherRect.height,
+        switcherTop: switcherRect.top,
+        switcherWidth: switcherRect.width,
+        titleTop: titleRect.top,
+        width: topbarRect.width
+      }
     }
-    const topbarRect = topbar.getBoundingClientRect()
-    const titleRect = title.getBoundingClientRect()
-    const switcherRect = switcher.getBoundingClientRect()
-    const actionsRect = actions.getBoundingClientRect()
-    const outside = (rect) => rect.left < topbarRect.left - 1 || rect.right > topbarRect.right + 1
-    const controls = [...topbar.querySelectorAll('button')].map((element) =>
-      element.getBoundingClientRect()
-    )
-    const preview = topbar.querySelector('[data-header-preview]')?.getBoundingClientRect()
-    return {
-      centerOffset:
-        switcherRect.left + switcherRect.width / 2 - topbarRect.left - topbarRect.width / 2,
-      previewAboveView:
-        preview !== undefined &&
-        preview.top + preview.height / 2 < switcherRect.top + switcherRect.height / 2 - 1,
-      overlap: controls.some((a, i) =>
-        controls
-          .slice(i + 1)
-          .some(
-            (b) =>
-              Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 &&
-              Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1
-          )
-      ),
-      actionsHeight: actionsRect.height,
-      actionsTop: actionsRect.top,
-      height: topbarRect.height,
-      overflow:
-        document.documentElement.scrollWidth > document.documentElement.clientWidth ||
-        [titleRect, switcherRect, actionsRect, ...controls].some(outside),
-      switcherHeight: switcherRect.height,
-      switcherTop: switcherRect.top,
-      switcherWidth: switcherRect.width,
-      titleTop: titleRect.top,
-      width: topbarRect.width
+    let stableFrames = 0
+    let layout
+    // ResizeObserver and React may commit the new header mode after the viewport changes.
+    for (let frame = 0; frame < 120; frame += 1) {
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+      layout = measure()
+      const fits =
+        !layout.overflow &&
+        !layout.overlap &&
+        !layout.previewAboveView &&
+        layout.switcherWidth <= 220 &&
+        (width !== 1440 || (layout.height <= 64 && Math.abs(layout.centerOffset) <= 1))
+      stableFrames = fits ? stableFrames + 1 : 0
+      if (stableFrames >= 3) return layout
     }
-  })
+    return layout
+  }, width)
 }
 
 async function verifyAllowAllAuthz(exchangeBase, unitId) {

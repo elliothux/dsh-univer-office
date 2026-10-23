@@ -28,9 +28,9 @@ import type {
   IDeserializedSheetBlock,
   ISheetBlock,
   IMutation,
-  ISnapshot
+  ISnapshot,
+  UniverType
 } from '@univerjs/protocol'
-import { UniverType } from '@univerjs/protocol'
 import type { Duplex } from 'node:stream'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {
@@ -152,10 +152,7 @@ export class CollabService {
         data
       } as CreateUnitFromDataInput,
       callOptions('local', {
-        [UNIVERFILE_UNIT_METADATA_KEY]: {
-          name,
-          createdAtMs: Date.now()
-        }
+        [UNIVERFILE_UNIT_METADATA_KEY]: { name }
       })
     )
     const sheetOrder = adapter.sheetOrder(data)
@@ -186,6 +183,9 @@ export class CollabService {
   public createWorktree(agentId = '', name = ''): WorktreeRecord {
     const worktreeId = newWorktreeId()
     const units = this.listUnits()
+    const records = new Map(
+      this.runtime.trunkAdapter.listUnitRecords().map((record) => [record.unitID, record])
+    )
     const options = callOptions(agentId || 'local', {
       [UNIVERFILE_WORKTREE_METADATA_KEY]: {
         agentId,
@@ -203,14 +203,22 @@ export class CollabService {
         sid: randomUUID(),
         status: 'draft'
       },
-      units: units.map((unit) => ({
-        worktreeID: worktreeId,
-        unitID: unit.unitId,
-        type: unit.type,
-        source: 'trunk',
-        baselineTrunkRevision: unit.headRev,
-        draftHeadRevision: unit.headRev
-      }))
+      units: units.map((unit) => {
+        const record = records.get(unit.unitId)
+        if (record === undefined) throw new Error(`Unit ${unit.unitId} disappeared`)
+        // A Worktree Unit joined from trunk keeps the trunk Unit's creation identity, which the
+        // SDK requires of every Unit record.
+        return {
+          worktreeID: worktreeId,
+          unitID: unit.unitId,
+          type: unit.type,
+          source: 'trunk',
+          creatorID: record.creatorID,
+          createdAt: record.createdAt,
+          baselineTrunkRevision: unit.headRev,
+          draftHeadRevision: unit.headRev
+        }
+      })
     })
     return requireWorktree(this.runtime, worktreeId)
   }
@@ -271,7 +279,9 @@ export class CollabService {
     )
     return {
       changesets: [...result.changesets],
-      latestRevision: result.latestRevision
+      // The SDK stopped reporting the head revision with a changeset range; the
+      // Worktree unit summary already carries the draft head this call describes.
+      latestRevision: unit.headRev
     }
   }
 
@@ -520,7 +530,7 @@ export class CollabService {
           this._externalizeImages(params, unitId, worktreeId)
         )
       ),
-      createTime: Date.now()
+      createTime: Math.floor(Date.now() / 1000)
     }
     const result = await this.runtime.worktreeService.submitChangeset(
       { worktreeID: worktreeId, changeset },
@@ -745,30 +755,73 @@ export class CollabService {
       if (deleted) {
         return {
           type: deleted.type,
-          changesets: [],
           error: `Unit ${unitId} is deleted in Worktree ${worktreeId}`
         }
       }
       throw new Error(`Unit ${unitId} is not part of Worktree ${worktreeId}`)
     }
-    const result = await this.runtime.worktreeService.getUnitLoadData(
-      {
-        worktreeID: worktreeId,
-        unitID: unitId,
+    const worktree = requireWorktree(this.runtime, worktreeId)
+    if (worktree.status !== 'ready') {
+      return {
         type: unit.type,
-        revision: 0
-      },
+        error: `Worktree ${worktreeId} is ${worktree.status}; merge preview requires ready`
+      }
+    }
+    const evaluation = await this.runtime.worktreeService.evaluateWorktreeUnitMerge(
+      { worktreeID: worktreeId, unitID: unitId },
       callOptions('local')
     )
-    const sheetBlocks =
-      unit.type === UniverType.UNIVER_SHEET
-        ? await this._readWorktreeSheetBlocks(worktreeId, unitId, unit.type, result.snapshot)
-        : undefined
-    return {
-      type: unit.type,
-      snapshot: result.snapshot,
-      ...(sheetBlocks === undefined ? {} : { sheetBlocks }),
-      changesets: [...result.changesets]
+    switch (evaluation.status) {
+      case 'preview':
+        return previewUnitData(
+          unit.type,
+          evaluation.preview.snapshot,
+          evaluation.preview.sheetBlocks ?? []
+        )
+      case 'not-behind':
+        return this._materializeWorktreeHead(worktreeId, unit)
+      case 'not-applicable':
+        if (evaluation.reason === 'worktree-created-unit') {
+          return this._materializeWorktreeHead(worktreeId, unit)
+        }
+        return {
+          type: unit.type,
+          error: `Unit ${unitId} is deleted in Worktree ${worktreeId}`
+        }
+      case 'conflict':
+        return {
+          type: unit.type,
+          error: `Unit ${unitId} conflicts with the latest version`
+        }
+      case 'already-merged':
+        return {
+          type: unit.type,
+          error: `Unit ${unitId} is already merged`
+        }
+      default: {
+        const unreachable: never = evaluation
+        return unreachable
+      }
+    }
+  }
+
+  /** Draft head, used when the evaluator has no trunk delta to apply. */
+  private async _materializeWorktreeHead(
+    worktreeId: string,
+    unit: UniverfileWorktreeUnitSummary
+  ): Promise<MergePreviewUnitData> {
+    const loadData = await this._getWorktreeLoadDataWithBlocks(
+      worktreeId,
+      unit.unitId,
+      unit.type,
+      unit.headRev
+    )
+    const materializer = new UnitSnapshotMaterializer()
+    try {
+      const materialized = await materializer.materializeSnapshot(loadData)
+      return previewUnitData(unit.type, materialized.snapshot, materialized.sheetBlocks)
+    } finally {
+      await materializer.dispose()
     }
   }
 
@@ -962,20 +1015,12 @@ export class CollabService {
     const materializer = new UnitSnapshotMaterializer()
     try {
       const materialized = await materializer.materializeSnapshot(loadData)
+      const sheetBlocks = deserializeSheetBlocks(materialized.sheetBlocks)
       return {
         present: true,
         revision: unit.revision,
         snapshot: materialized.snapshot,
-        ...(materialized.sheetBlocks.length === 0
-          ? {}
-          : {
-              sheetBlocks: materialized.sheetBlocks.map((block) => ({
-                id: block.id,
-                startRow: block.startRow,
-                endRow: block.endRow,
-                data: JSON.parse(new TextDecoder().decode(block.data)) as object
-              }))
-            })
+        ...(sheetBlocks === undefined ? {} : { sheetBlocks })
       }
     } finally {
       await materializer.dispose()
@@ -1168,21 +1213,6 @@ export class CollabService {
     })
   }
 
-  private async _readWorktreeSheetBlocks(
-    worktreeId: string,
-    unitId: string,
-    type: UniverType,
-    snapshot: ISnapshot
-  ): Promise<IDeserializedSheetBlock[]> {
-    const blocks = await this._readWorktreeSerializedSheetBlocks(worktreeId, unitId, type, snapshot)
-    return blocks.map((block) => ({
-      id: block.id,
-      startRow: block.startRow,
-      endRow: block.endRow,
-      data: JSON.parse(new TextDecoder().decode(block.data)) as object
-    }))
-  }
-
   private async _readWorktreeSerializedSheetBlocks(
     worktreeId: string,
     unitId: string,
@@ -1271,10 +1301,16 @@ class TrunkStorageCompatibility {
         },
         callOptions('local')
       )
+      // A changeset range no longer reports the head revision, so read it from the
+      // adapter the SDK now exposes for unit metadata.
+      const unit = await this._runtime.trunkService.dbAdapter.getUnit(
+        databaseContext(callOptions('local')),
+        request.unitID
+      )
       return {
         error: { code: 1, message: '' },
         changesets: result.changesets,
-        latestRevision: result.latestRevision
+        latestRevision: unit?.headRevision ?? 0
       }
     } catch (error) {
       return {
@@ -1351,6 +1387,31 @@ class WorktreeCatalogCompatibility {
       .find((worktree) => worktree.worktreeId === worktreeId)
     return row ? toWorktreeRecord(row) : undefined
   }
+}
+
+function previewUnitData(
+  type: UniverType,
+  snapshot: ISnapshot,
+  blocks: readonly ISheetBlock[]
+): MergePreviewUnitData {
+  const sheetBlocks = deserializeSheetBlocks(blocks)
+  return {
+    type,
+    snapshot,
+    ...(sheetBlocks === undefined ? {} : { sheetBlocks })
+  }
+}
+
+function deserializeSheetBlocks(
+  blocks: readonly ISheetBlock[]
+): IDeserializedSheetBlock[] | undefined {
+  if (blocks.length === 0) return undefined
+  return blocks.map((block) => ({
+    id: block.id,
+    startRow: block.startRow,
+    endRow: block.endRow,
+    data: JSON.parse(new TextDecoder().decode(block.data)) as object
+  }))
 }
 
 function callOptions(

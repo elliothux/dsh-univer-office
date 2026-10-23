@@ -1,6 +1,7 @@
 import {
   GATEWAY_CAPABILITY_UNIVERFILE_VIEWER,
   WorktreeControlClient,
+  decodeUniverfile,
   fetchGatewayDescriptor,
   type MergePreview,
   type MergePreviewUnitResponse,
@@ -164,7 +165,7 @@ class ViewerController {
   }
 
   /**
-   * Read-only merge-preview render of one unit, from the gateway's computed `{snapshot, changesets}`
+   * Read-only merge-preview render of one unit, from the gateway's evaluated snapshot
    * (no collaboration). Always rebuilds: preview data is re-fetched on unit switch and recompute.
    */
   public async showPreview(
@@ -265,7 +266,6 @@ class ViewerController {
           unitType: job.unit.type,
           snapshot: job.data.snapshot,
           ...(job.data.sheetBlocks === undefined ? {} : { sheetBlocks: job.data.sheetBlocks }),
-          changesets: job.data.changesets,
           locale: this.getLocale(),
           darkMode: this.getDarkMode()
         })
@@ -344,7 +344,7 @@ export class App {
   private previews = new Map<string, MergePreview>()
   /** Why a worktree's merge preview is unavailable (business error / fetch failure), by worktreeId. */
   private previewErrors = new Map<string, string>()
-  /** Within a diverged worktree: showing the merge preview (true) vs the original edits (false). */
+  /** Within a ready, diverged worktree: merge preview (true) vs the original edits (false). */
   private viewPreview = false
   /** Orthogonal Worktree content mode. Diff always renders two pinned, read-only sides. */
   private comparisonMode = false
@@ -458,7 +458,7 @@ export class App {
   /** Display label for the sidebar header (file name without the .univer suffix). */
   public get univerfileName(): string {
     return (
-      this.cfg.univerfile
+      this.univerfilePath
         .split(/[\\/]/u)
         .pop()
         ?.replace(/\.univer$/iu, '') ?? 'univerfile'
@@ -466,7 +466,14 @@ export class App {
   }
 
   public get univerfilePath(): string {
-    return this.cfg.univerfile
+    if (this.cfg.gatewayFileKey === undefined) return this.cfg.univerfile
+    // Decode only the display label; requests retain the authorized opaque key.
+    try {
+      return decodeUniverfile(this.cfg.gatewayFileKey)
+    } catch {
+      // A malformed deep link still reaches the normal resource error surface.
+      return this.cfg.univerfile
+    }
   }
 
   /** The React content pane binds its host element here; the viewer renders inside it. */
@@ -548,6 +555,18 @@ export class App {
     if (initWorktree && isViewableWorktreeStatus(initWorktree.status)) {
       await this.enterWorktree(initWorktree.worktreeId, this.initUnitId ?? undefined)
     } else {
+      // A bare file link should show pending content when nothing has reached trunk yet.
+      // Explicit deep links and embedded review scopes retain their requested target.
+      const defaultWorktree =
+        this.initWorktreeId === null && this.initUnitId === null && this.trunkUnits.length === 0
+          ? [...this.worktrees.values()].find((worktree) =>
+              isViewableWorktreeStatus(worktree.status)
+            )
+          : undefined
+      if (defaultWorktree !== undefined) {
+        await this.enterWorktree(defaultWorktree.worktreeId)
+        return
+      }
       if (this.initWorktreeId !== null && !initWorktree) {
         toast(t().toast.worktreeGone)
       }
@@ -899,9 +918,20 @@ export class App {
         isViewableWorktreeStatus(prev.status) &&
         isViewableWorktreeStatus(worktree.status)
       ) {
-        // draft <-> ready changes the server-side write policy. Replace the collaboration
-        // session so an old tab cannot retain an in-flight/local queue against stale permissions.
-        this.viewer.reload()
+        const becameReady = prev.status === 'draft' && worktree.status === 'ready'
+        const becameDraft = prev.status === 'ready' && worktree.status === 'draft'
+        if (becameDraft) this.viewPreview = false
+        if (becameReady && this.previews.get(worktree.worktreeId)?.diverged === true) {
+          this.viewPreview = true
+        }
+        const unitId = this.selectedUnitId
+        if (!this.comparisonMode && unitId !== undefined && (becameDraft || becameReady)) {
+          void this.selectWorktreeUnit(worktree.worktreeId, unitId)
+        } else {
+          // draft <-> ready changes the server-side write policy. Replace the collaboration
+          // session so an old tab cannot retain an in-flight/local queue against stale permissions.
+          this.viewer.reload()
+        }
       }
     }
     // draft -> ready: the agent just finished; nudge the user and flash that row once.
@@ -1245,8 +1275,11 @@ export class App {
     this.selectedUnitId = undefined
     await this.loadWorktreeUnits(worktreeId)
     await this.refreshPreview(worktreeId)
-    // Default to the merge preview when the worktree has fallen behind the latest version.
-    this.viewPreview = forcePreview ?? this.previews.get(worktreeId)?.diverged ?? false
+    // A ready worktree that has fallen behind opens on the evaluated merge preview.
+    const worktree = this.worktrees.get(worktreeId)
+    this.viewPreview =
+      forcePreview ??
+      (worktree?.status === 'ready' && this.previews.get(worktreeId)?.diverged === true)
     this.subscribeWorktree(worktreeId)
     this.emit()
     const pick =

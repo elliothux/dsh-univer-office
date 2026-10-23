@@ -107,7 +107,7 @@ Every content type supports isolated draft editing, side-by-side semantic compar
 
 ### 1. Install the plugin
 
-Supported DSH versions are `0.1.5-rc.1`, `0.1.6-alpha.1`, and their later `0.1.x` releases (`^0.1.5-rc.1 || ^0.1.6-alpha.1`).
+Supported DSH versions are `0.1.5-rc.3`, `0.1.7-rc.1`, and `0.2.0-rc.1`.
 
 If DSH is running, first press **Ctrl+C** in the terminal that started it. You can run the installation command while DSH is running, but the current DSH process will not load the new plugin automatically.
 
@@ -134,7 +134,7 @@ Create a monthly expense spreadsheet with dates, categories, amounts, a total, a
 ### 3. Review it in the conversation
 
 - Changes appear in a live, movable preview window while the agent works.
-- Review cards remain in the conversation and can be folded or opened fullscreen later.
+- Review cards remain in the conversation and can be folded or opened fullscreen later. Fullscreen escapes conversation layout constraints, preserves the card's space without reloading the Viewer, and supports Esc to exit.
 - Continue editing, approve, or discard changes from the Univer page embedded in the card.
 
 ## How it works
@@ -169,9 +169,10 @@ DSH selects these tools automatically; you normally do not need to call them man
 
 ## Preview and review experience
 
-- **Live Univer window** — changes open automatically in a window you can drag, resize, fold, or maximize. Disable automatic opening in the plugin's settings — the **Univer Office** page under the sidebar **Plugins** page (or **Settings → Plugins → Plugin configuration** on DSH releases before 0.1.6-alpha.2) — without removing conversation review cards.
+- **On-demand preview from the file tree** — click a `.univer` file in the DSH file tree and it opens in the right sidebar, alongside the built-in previews for `.docx`, `.xlsx`, and `.pptx`. No agent operation is involved: this is the entry point that still works when automatic live previews are off. Version navigation and worktree review are handled inside the Viewer. Opening a file without a specific target defaults to the first active worktree when trunk has no documents. It registers on DSH's own right sidebar; when the `dsh-better-sidebar` plugin is installed instead, it is registered as one of that plugin's file viewers, because that plugin takes over file addresses.
+- **Live Univer window** — changes open automatically in a window you can drag, resize, fold, or maximize. Disable automatic opening in the plugin's settings — the **dsh-univer-office** detail page under the sidebar **Plugins** page (or **Settings → Plugins → Plugin configuration** on DSH releases before 0.1.6-alpha.2) — without removing conversation review cards or the file-tree preview above.
+- **Conversation review cards** — each edited `.univer` file has its own full preview card, while deleted temporary files leave no stale cards behind. Turn them off with **Show review cards in the conversation** in the plugin's settings for a more compact conversation; the file-tree preview and the live window are controlled by their own switches.
 - **Host-owned Viewer windows** — an embedding host may route live previews and the review-card fullscreen action to its own document window. Standalone DSH keeps the built-in window behavior.
-- **Conversation review cards** — each edited `.univer` file has its own full preview card, while deleted temporary files leave no stale cards behind.
 - **Pinned worktree comparison** — use **Compare** in a draft or submitted worktree to compare it with trunk or another active worktree. Both sides are pinned when the comparison opens, changed entities can be navigated, and a refresh control appears if either side advances.
 - **Responsive review Header** — View/Compare stays centered when space permits; controls share a compact row and wrap in order as the window narrows. The title shows the selected document name; long names truncate, and merge-status messages remain visible.
 - **Historical review** — drafts, submitted changes, approvals, and discarded results remain in the conversation, with older cards collapsed by default.
@@ -183,6 +184,8 @@ DSH selects these tools automatically; you normally do not need to call them man
 ## Requirements and current limits
 
 - DeepSeek Harness and Node.js `>=22.19.0`.
+- The file-tree preview needs no extra plugin: it registers a tab type on DSH's right sidebar and claims `dsh-resource://file/**` addresses ending in `.univer`. While `dsh-better-sidebar` (`^0.19.0`) is installed it takes over file addresses at the same priority with a broader pattern, so the preview is registered as one of its file viewers instead — both shapes are covered, and only one ever applies.
+- Older `.univer` files are automatically upgraded to format v3 when opened. A backup is saved beside the original; migration and validation run on a temporary copy, which replaces the original only after success. Failed upgrades leave the original unchanged. Opening the same unchanged file again reuses that backup instead of writing another copy. File optimization upgrades its output copy without changing the source.
 - Screenshots, PDF printing, Slide layout checks, and SVG text measurement need a local Chromium-family browser. Chrome/Chromium and Microsoft Edge are detected automatically; set the `browserExecutablePath` option or the `UNIVER_RENDER_BROWSER` environment variable to point at a specific executable (for example Edge on Windows).
 - Slide master pages, layout pages, and speaker notes are outside the current editing scope.
 - Board mind maps, tables, ink, advanced editing, and file export are not yet supported.
@@ -210,7 +213,7 @@ The defaults are designed for local use: the service starts at port `9080`. If t
 | `tools` | `true` | Enable agent editing capabilities |
 | `skills` | `true` | Enable bundled task guidance |
 
-The Viewer, its HTTP API, and its WebSocket collaboration traffic are served by the plugin on the DSH WebServer origin itself (`/univer-viewer/...` and `/uf/...`), so remote deployments work through whatever entry already fronts DSH — no extra reverse-proxy configuration. Every browser request passes DSH browser authentication via the `connection` service before it is scoped to the named live session; the Gateway itself stays on loopback and is never exposed. (The former `viewerBaseUrl` option was removed by this change and is ignored.)
+The Viewer, its HTTP API, and its WebSocket collaboration traffic are served by the plugin on the DSH WebServer origin itself (`/univer-viewer/...` and `/uf/...`), so remote deployments work through whatever entry already fronts DSH — no extra reverse-proxy configuration. Every browser request passes DSH browser authentication via the `connection` service. Viewer document opens and `/univer-api` requests also validate the named session workspace; subsequent `/uf` API and WebSocket requests do not require a plugin session cookie or repeat that workspace check. Authenticated browsers can address any `.univer` file accessible to the Host process, including in remote deployments. In DSH Desktop, the Viewer obtains the current Host loopback address through an authenticated runtime endpoint for WebSocket connections; HTTP requests continue through the desktop shell. The Gateway itself stays on loopback and is never exposed. (The former `viewerBaseUrl` option was removed by this change and is ignored.)
 
 ## Telemetry
 

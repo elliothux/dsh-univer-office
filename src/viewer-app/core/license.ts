@@ -4,19 +4,23 @@ let viewerLicense: Promise<ViewLicenseConfig> | undefined
 
 /** Resolve the host-provided production license once, falling back to the bundled dev license. */
 export function loadViewerLicense(): Promise<ViewLicenseConfig> {
-  viewerLicense ??= fetch('/univer-viewer/license', { credentials: 'same-origin' }).then(
-    async (response) => {
-      if (response.status === 204 || response.status === 404) return { license: TEST_LICENSE }
-      if (!response.ok) {
-        throw new Error(`Failed to load the Univer license (${String(response.status)}).`)
-      }
-      const value: unknown = await response.json()
-      if (!isViewLicenseConfig(value)) {
-        throw new Error('The Univer license response is invalid.')
-      }
-      return value
+  const url = new URL('/univer-viewer/license', location.href)
+  const params = new URLSearchParams(location.search)
+  for (const name of ['file', 'sessionId']) {
+    const value = params.get(name)
+    if (value !== null) url.searchParams.set(name, value)
+  }
+  viewerLicense ??= fetch(url, { credentials: 'same-origin' }).then(async (response) => {
+    if (response.status === 204 || response.status === 404) return { license: TEST_LICENSE }
+    if (!response.ok) {
+      throw new Error(`Failed to load the Univer license (${String(response.status)}).`)
     }
-  )
+    const value: unknown = await response.json()
+    if (!isViewLicenseConfig(value)) {
+      throw new Error('The Univer license response is invalid.')
+    }
+    return value
+  })
   return viewerLicense
 }
 

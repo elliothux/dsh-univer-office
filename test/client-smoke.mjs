@@ -5,10 +5,11 @@
 // closes the window and embeds the merge panel → merged panel shows trunk.
 //
 //   node test/client-smoke.mjs
+import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { join, dirname, isAbsolute } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 
@@ -100,6 +101,20 @@ const currentState = () => ({
 const stateRequests = []
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
+  if (req.method === 'GET' && url.pathname === '/univer-api/status') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(
+      JSON.stringify({
+        gateway: {
+          phase: gatewayPhase,
+          gateway: gatewayPhase === 'running' ? 'http://127.0.0.1:9123' : null,
+          owned: false
+        },
+        unitContent: 'bundled'
+      })
+    )
+    return
+  }
   if (req.method === 'GET' && url.pathname === '/univer-api/state') {
     const file = url.searchParams.get('file')
     if (url.searchParams.get('sessionId') !== 'test-session-id') {
@@ -107,6 +122,11 @@ const server = createServer(async (req, res) => {
       return
     }
     stateRequests.push(file)
+    if (gatewayPhase !== 'running') {
+      res.writeHead(503, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, code: 'GATEWAY_UNAVAILABLE', message: 'no gateway' }))
+      return
+    }
     if (file !== null && missingFiles.has(file)) {
       res.writeHead(400, { 'content-type': 'application/json' })
       res.end(
@@ -174,6 +194,18 @@ if (dom.window.PointerEvent === undefined) {
     }
   }
 }
+// jsdom has no dialog top layer; actual containment and iframe continuity are
+// verified in the browser layout regression. This shim only models open state.
+dom.window.HTMLDialogElement.prototype.show = function () {
+  this.open = true
+}
+dom.window.HTMLDialogElement.prototype.showModal = function () {
+  this.open = true
+}
+dom.window.HTMLDialogElement.prototype.close = function () {
+  this.open = false
+}
+
 globalThis.window = dom.window
 globalThis.document = dom.window.document
 Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, configurable: true })
@@ -211,14 +243,31 @@ let localeDicts = null
 let conversationDefinition = null
 let activeLocale = 'zh'
 let localeRevision = 0
+const localeListeners = new Set()
+/** Switch the active locale the way the runtime does: bump the revision and notify. */
+function setActiveLocale(next) {
+  activeLocale = next
+  localeRevision += 1
+  for (const listener of localeListeners) listener()
+}
+/** File viewers the client half registered with the optional sidebar service. */
+const sidebarViewers = []
+/** Native right-Sidebar tab types the client half registered. */
+const nativeTabTypes = []
+/** Gateway phase the fake host reports; a stopped Gateway cannot project Viewer URLs. */
+let gatewayPhase = 'running'
+const modernSettings = process.env.UNIVER_SETTINGS_API === 'configForms'
+let settingsWriteFailure
+const settingsEffects = []
+const SETTINGS_DEFAULTS = { autoOpenLivePreview: true, conversationReviewCards: true }
 let settingsRevision = 0
-let settingsValue = true
+let settingsValue = { ...SETTINGS_DEFAULTS }
 let settingsUser = {}
 const settingsListeners = new Set()
 const makeSettingsSnapshot = () => ({
   status: 'ready',
-  value: { autoOpenLivePreview: settingsValue },
-  base: { autoOpenLivePreview: true },
+  value: { ...settingsValue },
+  base: { ...SETTINGS_DEFAULTS },
   user: settingsUser,
   revision: settingsRevision,
   writable: true,
@@ -236,18 +285,24 @@ const settingsScope = {
     return () => settingsListeners.delete(listener)
   },
   async set(field, value) {
-    if (field !== 'autoOpenLivePreview' || typeof value !== 'boolean')
-      throw new Error('unexpected settings write')
-    settingsValue = value
-    settingsUser = { autoOpenLivePreview: value }
+    if (settingsWriteFailure === 'throw') throw new Error('transport unavailable')
+    if (settingsWriteFailure === 'refuse') return false
+    if (!Object.hasOwn(SETTINGS_DEFAULTS, field) || typeof value !== 'boolean')
+      throw new Error(`unexpected settings write: ${field}`)
+    settingsValue = { ...settingsValue, [field]: value }
+    settingsUser = { ...settingsUser, [field]: value }
     settingsRevision += 1
     settingsSnapshot = makeSettingsSnapshot()
     for (const listener of settingsListeners) listener()
+    return modernSettings ? true : undefined
   },
   async unset(field) {
-    if (field !== 'autoOpenLivePreview') throw new Error('unexpected settings reset')
-    settingsValue = true
-    settingsUser = {}
+    if (!Object.hasOwn(SETTINGS_DEFAULTS, field))
+      throw new Error(`unexpected settings reset: ${field}`)
+    settingsValue = { ...settingsValue, [field]: SETTINGS_DEFAULTS[field] }
+    const nextUser = { ...settingsUser }
+    delete nextUser[field]
+    settingsUser = nextUser
     settingsRevision += 1
     settingsSnapshot = makeSettingsSnapshot()
     for (const listener of settingsListeners) listener()
@@ -261,12 +316,15 @@ const conversationEventRegistry = {
 }
 const fakeCtx = {
   inject(services, callback) {
-    if (services.join(',') !== 'settingsScope')
+    const key = services.join(',')
+    if (key === (modernSettings ? 'settingsScope' : 'configForms')) return () => {}
+    if (!['settingsScope', 'configForms', 'betterSidebar', 'sidebarRightTabs'].includes(key))
       throw new Error(`unexpected ctx.inject(${JSON.stringify(services)})`)
     return callback(fakeCtx)
   },
   effect(fn) {
     const disposer = fn()
+    settingsEffects.push(disposer)
     return () => {
       if (typeof disposer === 'function') disposer()
     }
@@ -281,7 +339,8 @@ const fakeCtx = {
         key !== 'conversation.input.dock' &&
         key !== 'conversation.chat.turnTail' &&
         key !== 'plugins.bundle.config' &&
-        key !== 'settings.plugin.item'
+        key !== 'settings.plugin.item' &&
+        key !== 'sidebar.right.pane.tab'
       )
         throw new Error(`unexpected slots.inject("${key}")`)
       return callback()
@@ -304,10 +363,35 @@ const fakeCtx = {
     },
     getSnapshot() {
       return { active: activeLocale, revision: localeRevision }
+    },
+    subscribe(listener) {
+      localeListeners.add(listener)
+      return () => localeListeners.delete(listener)
     }
   },
   get(name) {
+    if (name === 'configForms')
+      return {
+        get(entryId) {
+          if (entryId !== 'univer') throw new Error(`unexpected config entry ${entryId}`)
+          return settingsScope
+        }
+      }
     if (name === 'uiConversation') return { events: conversationEventRegistry }
+    if (name === 'sidebarRightTabs')
+      return {
+        register(definition) {
+          nativeTabTypes.push(definition)
+          return () => {}
+        }
+      }
+    if (name === 'betterSidebar')
+      return {
+        registerFileViewer(descriptor) {
+          sidebarViewers.push(descriptor)
+          return () => {}
+        }
+      }
     throw new Error(`unexpected ctx.get("${name}")`)
   }
 }
@@ -341,7 +425,7 @@ if (localeDicts === null || localeDicts.ns !== 'univer')
   throw new Error('locale dictionaries not registered')
 if (conversationDefinition === null || conversationDefinition.kind !== 'univerTurn')
   throw new Error('Conversation definition not registered')
-if (pluginExports.inject.join(',') !== 'slots,locale,conversation')
+if (pluginExports.inject.join(',') !== 'slots,locale,conversation,uiConversation')
   throw new Error('Client must depend only on Conversation services of the supported DSH line')
 if (
   dockEntry.options.locale !== 'univer' ||
@@ -357,8 +441,80 @@ if (
   typeof tailInjected.getViewerLocale !== 'function'
 )
   throw new Error('Viewer locale getter missing')
-if (dockInjected.livePreview === undefined || settingsInjected.settings !== settingsScope)
+if (dockInjected.preferences === undefined || settingsInjected.settings !== settingsScope)
   throw new Error('Settings preference injection missing')
+
+// ---- on-demand `.univer` file viewer registration ----
+// A click on the file in the DSH file tree must reach the Viewer with no agent
+// write, so the client half registers a previewer for the `.univer` extension.
+if (sidebarViewers.length !== 1)
+  throw new Error(`expected exactly one sidebar file viewer, got ${sidebarViewers.length}`)
+const fileViewer = sidebarViewers[0]
+if (fileViewer.id !== 'univer-office:univer')
+  throw new Error(`unexpected file viewer id: ${fileViewer.id}`)
+if (fileViewer.exts.join(',') !== 'univer')
+  throw new Error(`file viewer must claim the .univer extension, got ${fileViewer.exts.join(',')}`)
+if (!(fileViewer.priority > 0))
+  throw new Error('file viewer must outrank the sidebar catch-all viewer')
+if (fileViewer.fetchStrategy !== 'none')
+  throw new Error(
+    '.univer is a binary container: a byte-reading strategy would render the download pane instead'
+  )
+if (typeof fileViewer.component !== 'function') throw new Error('file viewer component missing')
+
+// ---- on-demand `.univer` preview as a NATIVE right-Sidebar tab type ----
+// dsh-better-sidebar wins the address claim whenever it is installed, so the
+// registration above only covers hosts that have it. This one covers the rest:
+// without it, a host on DSH's own file tree has no `.univer` preview at all.
+if (nativeTabTypes.length !== 1)
+  throw new Error(`expected exactly one native sidebar tab type, got ${nativeTabTypes.length}`)
+const nativeTab = nativeTabTypes[0]
+if (nativeTab.id !== 'dsh-univer-office') throw new Error(`unexpected tab id: ${nativeTab.id}`)
+if (nativeTab.kind !== 'univer')
+  throw new Error(`the tab kind must be this plugin's own, got ${nativeTab.kind}`)
+if (nativeTab.patterns.join(',') !== '*.univer')
+  throw new Error(`tab type must claim .univer, got ${nativeTab.patterns.join(',')}`)
+if (nativeTab.priority !== 'extension')
+  throw new Error('a third-party tab type claims addresses in the highest band')
+const SESSION_ADDRESS = 'dsh-resource://file/session/test-session-id/预览演示/月度支出表.univer'
+if (nativeTab.canOpen(SESSION_ADDRESS) !== true)
+  throw new Error('a session-scoped file address must be claimable')
+if (nativeTab.canOpen('dsh-resource://file/absolute/home/me/x.univer') !== false)
+  throw new Error('the absolute scope carries no session, so the state route cannot authorize it')
+if (nativeTab.canOpen('dsh-resource://note/session/s1/x.univer') !== false)
+  throw new Error('only file addresses belong to this type')
+if (nativeTab.title(SESSION_ADDRESS) !== '月度支出表.univer')
+  throw new Error(
+    `the chip title must be the decoded basename, got ${nativeTab.title(SESSION_ADDRESS)}`
+  )
+const nativeBodyEntry = slotEntries.find(
+  (entry) => entry.options.name === 'sidebar.right.pane.tab' && entry.options.key === nativeTab.id
+)
+if (nativeBodyEntry === undefined)
+  throw new Error('the native tab body must register under the type id')
+if (typeof nativeBodyEntry.Component !== 'function')
+  throw new Error('native tab body is not a component')
+
+// The mirrored `dsh-resource://file/…` grammar, exercised through the two
+// members the sidebar actually calls rather than by reaching into the parser.
+for (const [address, claimable, title] of [
+  ['dsh-resource://file/session/s1/src/a.univer', true, 'a.univer'],
+  ['dsh-resource://file/session/s1/%E6%9C%88%E5%BA%A6.univer', true, '月度.univer'],
+  ['dsh-resource://file/session/s1/a%20b.univer', true, 'a b.univer'],
+  ['dsh-resource://file/session/s1/a.univer?line=3#frag', true, 'a.univer'],
+  ['dsh-resource://file/session/s1/C:/dir/a.univer', true, 'a.univer'],
+  ['dsh-resource://file/absolute/home/me/a.univer', false, undefined],
+  ['dsh-resource://note/session/s1/a.univer', false, undefined],
+  ['dsh-resource://file/session/s1/%ZZ.univer', false, undefined],
+  ['sidebar://guide', false, undefined],
+  ['/plain/path/a.univer', false, undefined]
+]) {
+  if (nativeTab.canOpen(address) !== claimable)
+    throw new Error(`canOpen(${address}) must be ${claimable}`)
+  if (title !== undefined && nativeTab.title(address) !== title)
+    throw new Error(`title(${address}) must be ${title}, got ${nativeTab.title(address)}`)
+}
+
 // ---- definition pure-accumulator sanity: reads never erase a ready transition ----
 {
   const def = conversationDefinition
@@ -430,6 +586,66 @@ if (dockInjected.livePreview === undefined || settingsInjected.settings !== sett
     }
   }
   state = def.update(mkContext(state), readyResult)
+  // Session format v4 (DSH 0.1.7): the tool result is a first-class tool-role
+  // message — `toolCallId` / `isError` sit on the message and `content` holds
+  // the text blocks directly (no `tool-result` wrapper block). The definition
+  // must read both shapes; 0.3.2 threw "reading 'flatMap'" on this one and took
+  // the whole conversation timeline down with it.
+  {
+    let v4 = def.start({ state: undefined }, startMatch, { previous: () => undefined })
+    v4 = def.update(mkContext(v4), readyCall)
+    v4 = def.update(mkContext(v4), {
+      id: '7',
+      role: 'update',
+      location: { kind: 'turn', turn: 7 },
+      event: {
+        type: 'tool/result',
+        data: {
+          turn: 7,
+          step: 1,
+          message: {
+            role: 'tool',
+            source: { kind: 'tool', callId: 'call-ready' },
+            toolCallId: 'call-ready',
+            isError: false,
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  operation: 'worktree',
+                  file: '/x/proj/notes/demo.univer',
+                  result: { action: 'ready', worktreeId: 'wt-abc12345' }
+                })
+              }
+            ]
+          }
+        }
+      }
+    })
+    const op = v4.files[0]?.operations.find((entry) => entry.callId === 'call-ready')
+    if (op === undefined || op.phase !== 'succeeded' || op.worktreeId !== 'wt-abc12345')
+      throw new Error(`v4 tool/result shape not applied: ${JSON.stringify(v4.files)}`)
+    // A foreign (non-univer) v4 result must be ignored, not crash the timeline.
+    const foreign = def.update(mkContext(v4), {
+      id: '7',
+      role: 'update',
+      location: { kind: 'turn', turn: 7 },
+      event: {
+        type: 'tool/result',
+        data: {
+          turn: 7,
+          step: 1,
+          message: {
+            role: 'tool',
+            source: { kind: 'tool', callId: 'call-other' },
+            toolCallId: 'call-other',
+            content: [{ type: 'text', text: 'total 12\n-rw-r--r-- x' }]
+          }
+        }
+      }
+    })
+    if (foreign !== v4) throw new Error('foreign v4 tool/result must leave state untouched')
+  }
   const laterStatus = {
     id: '7',
     role: 'update',
@@ -596,7 +812,7 @@ function render(session, remount = true, cwd = SESSION_CWD) {
       ...runtimeProps(session),
       t,
       getViewerLocale: dockInjected.getViewerLocale,
-      livePreview: dockInjected.livePreview,
+      preferences: dockInjected.preferences,
       sessionId: 'test-session-id',
       useSessions: (selector) => selector({ byId: { 'test-session-id': { cwd } } })
     })
@@ -614,6 +830,7 @@ function render(session, remount = true, cwd = SESSION_CWD) {
       openFile: () => {},
       t,
       getViewerLocale: tailInjected.getViewerLocale,
+      preferences: tailInjected.preferences,
       sessionId: 'test-session-id',
       ...runtimeProps(session),
       useSessions: (selector) => selector({ byId: { 'test-session-id': { cwd } } })
@@ -632,6 +849,12 @@ async function waitFor(description, predicate, timeoutMs = 5000) {
 }
 const q = (selector) => document.querySelector(selector)
 const qa = (selector) => Array.from(document.querySelectorAll(selector))
+/** Encode one `/`-separated path the way the file-resource grammar encodes it. */
+const encodeAddressPath = (path) =>
+  path
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/')
 
 // ---- turn-tail preview: full standalone Viewer, not embedded mode ----
 // List-slot entries (DSH 0.1.6-alpha.2) receive the owner props and resolve
@@ -650,6 +873,7 @@ const tailProps = {
   sessionId: 'test-session-id',
   t,
   getViewerLocale: tailInjected.getViewerLocale,
+  preferences: tailInjected.preferences,
   ...runtimeProps(sessionWithTargets([{ file: DEMO_FILE, worktreeId: WORKTREE }], true)),
   useSessions: (selector) => selector({ byId: { 'test-session-id': { cwd: SESSION_CWD } } })
 }
@@ -670,8 +894,7 @@ await waitFor(
     tailRootEl.querySelector('.uvf_panelFrame')?.getAttribute('src') === ZH_FULL_DEFAULT_UNIT_URL
 )
 const tailFrame = tailRootEl.querySelector('.uvf_panelFrame')
-activeLocale = 'en'
-localeRevision += 1
+setActiveLocale('en')
 tailRoot.render(
   React.createElement(tailEntry.Component, {
     ...tailProps,
@@ -685,8 +908,7 @@ await waitFor(
 )
 if (tailRootEl.querySelector('.uvf_panelFrame') !== tailFrame)
   throw new Error('locale switch must update the existing Viewer iframe')
-activeLocale = 'zh'
-localeRevision += 1
+setActiveLocale('zh')
 tailRoot.render(
   React.createElement(tailEntry.Component, {
     ...tailProps,
@@ -952,7 +1174,10 @@ if (q('.uvf_panel') === null)
   settingsRootEl
     .querySelector('.uvf_settingsSave')
     .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
-  await waitFor('关闭设置后浮窗消失', () => settingsValue === false && q('.uvf_win') === null)
+  await waitFor(
+    '关闭设置后浮窗消失',
+    () => settingsValue.autoOpenLivePreview === false && q('.uvf_win') === null
+  )
   if (q('.uvf_panel') === null)
     throw new Error('disabling live windows must preserve conversation review cards')
   await waitFor(
@@ -971,7 +1196,7 @@ if (q('.uvf_panel') === null)
     .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
   await waitFor(
     '重新开启后当前修改恢复浮窗',
-    () => settingsValue === true && q('.uvf_win') !== null
+    () => settingsValue.autoOpenLivePreview === true && q('.uvf_win') !== null
   )
   document
     .querySelectorAll('.uvf_win .uvf_unit')[1]
@@ -984,11 +1209,139 @@ if (q('.uvf_panel') === null)
   settingsRootEl.remove()
 }
 
-// ---- scenario 1b: DSH locale switch updates shell copy and the live Viewer in place ----
+// ---- scenario 1a': Settings card hides conversation review cards independently ----
+// The two switches are independent: hiding cards must leave the live window alone,
+// and the on-demand file-tree preview is a separate surface entirely.
+{
+  const settingsRootEl = document.createElement('section')
+  document.body.appendChild(settingsRootEl)
+  const settingsRoot = createRoot(settingsRootEl)
+  settingsRoot.render(
+    React.createElement(settingsEntry.Component, { t, ...settingsInjected, view: 'page' })
+  )
+  await waitFor(
+    '设置卡片同时提供两个开关',
+    () => settingsRootEl.querySelectorAll('[role=switch]').length === 2
+  )
+  // Every interaction is scoped to the review-card row: scenario 1a left the
+  // live-window field overridden too, so an unscoped query would hit its Reset.
+  const reviewRow = () => settingsRootEl.querySelectorAll('.uvf_settingsField')[1]
+  const reviewSwitch = () => reviewRow().querySelector('[role=switch]')
+  const save = async (description, accepted) => {
+    await waitFor(`${description}: Save 可用`, () => {
+      const button = settingsRootEl.querySelector('.uvf_settingsSave')
+      return button !== null && !button.disabled
+    })
+    settingsRootEl
+      .querySelector('.uvf_settingsSave')
+      .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    await waitFor(description, accepted)
+  }
+  if (
+    settingsRootEl
+      .querySelectorAll('.uvf_settingsField')[0]
+      .querySelector('[role=switch]')
+      ?.getAttribute('aria-label') !== t('settings.autoOpenLivePreview')
+  )
+    throw new Error('the live-window switch must stay first')
+  if (reviewSwitch()?.getAttribute('aria-label') !== t('settings.conversationReviewCards'))
+    throw new Error('the review-card switch must be the second row')
+  if (q('.uvf_panel') === null) throw new Error('review cards must start visible')
+  reviewSwitch().dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+  await waitFor(
+    '关闭审阅卡片进入待保存状态',
+    () => reviewSwitch().getAttribute('aria-checked') === 'false'
+  )
+  await save(
+    '关闭审阅卡片后回合卡片消失',
+    () => settingsValue.conversationReviewCards === false && q('.uvf_panel') === null
+  )
+  if (q('.uvf_win') === null)
+    throw new Error('hiding review cards must leave the live window untouched')
+  reviewRow()
+    .querySelector('.uvf_settingsReset')
+    .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+  await save(
+    '恢复默认后审阅卡片回来',
+    () => settingsValue.conversationReviewCards === true && q('.uvf_panel') !== null
+  )
+  settingsRoot.unmount()
+  settingsRootEl.remove()
+}
+
+// ConfigForm may reject transport failures or explicitly refuse a write.
+if (modernSettings) {
+  const el = document.createElement('section')
+  document.body.appendChild(el)
+  const settingsRoot = createRoot(el)
+  settingsRoot.render(
+    React.createElement(settingsEntry.Component, { t, ...settingsInjected, view: 'page' })
+  )
+  await waitFor('modern settings form', () => el.querySelectorAll('[role=switch]').length === 2)
+  el.querySelectorAll('[role=switch]')[1].dispatchEvent(
+    new dom.window.MouseEvent('click', { bubbles: true })
+  )
+  for (const failure of ['throw', 'refuse']) {
+    settingsWriteFailure = failure
+    await waitFor('save can retry', () => !el.querySelector('.uvf_settingsSave').disabled)
+    el.querySelector('.uvf_settingsSave').dispatchEvent(
+      new dom.window.MouseEvent('click', { bubbles: true })
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await waitFor(
+      'failed save remains actionable',
+      () =>
+        el.querySelector('.uvf_settingsFailed') !== null &&
+        !el.querySelector('.uvf_settingsSave').disabled
+    )
+    if (settingsValue.conversationReviewCards !== true)
+      throw new Error('failed save changed durable preferences')
+  }
+  settingsWriteFailure = undefined
+  el.querySelector('.uvf_settingsSave').dispatchEvent(
+    new dom.window.MouseEvent('click', { bubbles: true })
+  )
+  await waitFor(
+    'retry persists retained draft',
+    () =>
+      settingsValue.conversationReviewCards === false &&
+      el.querySelector('.uvf_settingsSave').disabled
+  )
+  await settingsScope.unset('conversationReviewCards')
+  settingsRoot.unmount()
+  el.remove()
+}
+
+// ---- scenario 1a'': a Host settings schema older than this Client bundle ----
+// The Host half resolves the settings document, so a Client that ships first
+// (a rolling upgrade, or this session's HMR reload) reads a snapshot without
+// the new field. An absent field must keep the surface at its product default
+// instead of reading as "off" and hiding cards the user never turned off.
+//
+// The crafted snapshot keeps the shared field at its current value, so the
+// correct projection is byte-identical to the previous one and nothing
+// re-renders — which is why this settles instead of polling. With the bug the
+// projection changes to `undefined`, the card re-renders and unmounts.
+{
+  settingsSnapshot = {
+    ...settingsSnapshot,
+    value: { autoOpenLivePreview: true },
+    revision: settingsRevision + 1
+  }
+  for (const listener of settingsListeners) listener()
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+  if (q('.uvf_panel') === null) throw new Error('缺失的设置字段必须沿用产品默认值，而不是隐藏界面')
+  settingsSnapshot = {
+    ...settingsSnapshot,
+    value: { ...settingsValue },
+    revision: settingsRevision
+  }
+  for (const listener of settingsListeners) listener()
+}
+
 {
   const frame = q('.uvf_frame')
-  activeLocale = 'en'
-  localeRevision += 1
+  setActiveLocale('en')
   render(liveDraftSession, false)
   await waitFor(
     '浮窗切换英文',
@@ -1000,8 +1353,7 @@ if (q('.uvf_panel') === null)
     throw new Error('locale switch must preserve the live iframe element')
   if (q('.uvf_frame')?.getAttribute('src') !== EN_SLIDE_UNIT_URL)
     throw new Error('live Viewer must receive en-US after DSH switches to English')
-  activeLocale = 'zh'
-  localeRevision += 1
+  setActiveLocale('zh')
   render(liveDraftSession, false)
   await waitFor(
     '浮窗切回中文',
@@ -1285,6 +1637,9 @@ if (q('.uvf_panelMeta')?.textContent !== DEMO_FILE)
   throw new Error('review header metadata must contain only the full file path')
 if (q('.uvf_panelFoot') !== null || q('.uvf_action') !== null)
   throw new Error('card must defer lifecycle actions to the embedded Viewer')
+const inlinePanelParent = q('.uvf_panel').parentElement
+const inlineReviewFrame = q('.uvf_panelFrame')
+q('.uvf_panel').getBoundingClientRect = () => ({ height: 650 })
 q('[data-panel-action=fullscreen]').dispatchEvent(
   new dom.window.MouseEvent('click', { bubbles: true })
 )
@@ -1296,6 +1651,15 @@ if (q('[data-panel-action=fullscreen]')?.getAttribute('aria-label') !== '退出�
   throw new Error('fullscreen control must expose its current action')
 if (q('[data-panel-action=fold]') !== null)
   throw new Error('fullscreen review card must hide the fold control')
+if (q('.uvf_panelFrame') !== inlineReviewFrame)
+  throw new Error('fullscreen must preserve the Viewer iframe')
+if (
+  q('.uvf_panelPlaceholder')?.parentElement !== inlinePanelParent ||
+  q('.uvf_panelPlaceholder')?.style.height !== '650px'
+)
+  throw new Error('fullscreen review must preserve its inline footprint')
+if (document.activeElement !== q('[data-panel-action=fullscreen]'))
+  throw new Error('fullscreen review must retain keyboard focus')
 dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape' }))
 await waitFor(
   'Escape 退出审阅全屏',
@@ -1303,6 +1667,20 @@ await waitFor(
 )
 if (q('[data-panel-action=fold]') === null)
   throw new Error('fold control must return after exiting fullscreen')
+if (q('.uvf_panelFrame') !== inlineReviewFrame)
+  throw new Error('exiting fullscreen must preserve the Viewer iframe')
+if (q('.uvf_panel').parentElement !== inlinePanelParent || q('.uvf_panelPlaceholder') !== null)
+  throw new Error('exiting fullscreen must restore the inline card and remove its placeholder')
+if (document.activeElement !== q('[data-panel-action=fullscreen]'))
+  throw new Error('exiting fullscreen must restore keyboard focus')
+q('[data-panel-action=fullscreen]').dispatchEvent(
+  new dom.window.MouseEvent('click', { bubbles: true })
+)
+await waitFor('再次进入审阅全屏', () => q('.uvf_panel_fullscreen') !== null)
+q('[data-panel-action=fullscreen]').dispatchEvent(
+  new dom.window.MouseEvent('click', { bubbles: true })
+)
+await waitFor('按钮退出审阅全屏', () => q('.uvf_panel_fullscreen') === null)
 {
   const frame = q('.uvf_panelFrame')
   q('[data-panel-action=fold]').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
@@ -1317,8 +1695,7 @@ if (q('[data-panel-action=fold]') === null)
 {
   const frame = q('.uvf_panelFrame')
   const reviewSession = sessionWithTargets([{ file: DEMO_FILE, worktreeId: WORKTREE }], false)
-  activeLocale = 'en'
-  localeRevision += 1
+  setActiveLocale('en')
   render(reviewSession, false)
   await waitFor(
     '审阅卡片切换英文',
@@ -1331,8 +1708,7 @@ if (q('[data-panel-action=fold]') === null)
     throw new Error('locale switch must preserve the compact file and worktree header')
   if (q('.uvf_panelFrame') !== frame)
     throw new Error('locale switch must preserve the review iframe element')
-  activeLocale = 'zh'
-  localeRevision += 1
+  setActiveLocale('zh')
   render(reviewSession, false)
   await waitFor(
     '审阅卡片切回中文',
@@ -1398,8 +1774,14 @@ if (q('.uvf_win') !== null || q('.uvf_panelFrame')?.getAttribute('src') !== ZH_T
   throw new Error('replayed merged card must open the full mainline page')
 
 // ---- scenario 6: targets cleared → everything closes ----
+q('[data-panel-action=fullscreen]').dispatchEvent(
+  new dom.window.MouseEvent('click', { bubbles: true })
+)
+await waitFor('清空目标前进入全屏', () => q('.uvf_panel_fullscreen') !== null)
 render(sessionWithTargets([], false))
 await waitFor('targets 清空后全部关闭', () => q('.uvf_win') === null && q('.uvf_panel') === null)
+if (q('.uvf_panelPlaceholder') !== null)
+  throw new Error('unmounting fullscreen review must remove its placeholder')
 
 reactRoot.unmount()
 reviewRoot.unmount()
@@ -1411,7 +1793,9 @@ reviewRoot.unmount()
   const legacyCtx = {
     ...fakeCtx,
     inject(services, callback) {
-      if (services.join(',') !== 'settingsScope')
+      const key = services.join(',')
+      if (key === 'configForms') return () => {}
+      if (key !== 'settingsScope' && key !== 'betterSidebar' && key !== 'sidebarRightTabs')
         throw new Error(`unexpected ctx.inject(${JSON.stringify(services)})`)
       return callback(legacyCtx)
     },
@@ -1429,7 +1813,8 @@ reviewRoot.unmount()
           key !== 'conversation.input.dock' &&
           key !== 'conversation.chat.turnTail' &&
           key !== 'plugins.bundle.config' &&
-          key !== 'settings.plugin.item'
+          key !== 'settings.plugin.item' &&
+          key !== 'sidebar.right.pane.tab'
         )
           throw new Error(`unexpected slots.inject("${key}")`)
         return callback()
@@ -1477,5 +1862,164 @@ reviewRoot.unmount()
   legacyRootEl.remove()
 }
 
+// ---- on-demand .univer file viewer: click-to-preview with no agent write ----
+{
+  const fileViewerRootEl = document.createElement('div')
+  document.body.appendChild(fileViewerRootEl)
+  const fileViewerRoot = createRoot(fileViewerRootEl)
+  let fileViewerKey = 0
+  const renderFileViewer = () =>
+    fileViewerRoot.render(
+      React.createElement(fileViewer.component, {
+        key: 'fv' + ++fileViewerKey,
+        ctx: fakeCtx,
+        scope: { sessionId: 'test-session-id', cwd: SESSION_CWD },
+        path: DEMO_FILE,
+        title: 'demo.univer',
+        viewerId: fileViewer.id
+      })
+    )
+  const fileChips = () => Array.from(fileViewerRootEl.querySelectorAll('.uvf_unit'))
+  const fileFrameSrc = () => fileViewerRootEl.querySelector('iframe.uvf_frame')?.getAttribute('src')
+  // Opening the file must reach the Viewer with no agent operation: the client
+  // half resolves the Host-projected trunk target on its own.
+  worktrees = [wt('draft')]
+  renderFileViewer()
+  await waitFor('点击文件即按需展示当前版本', () => fileFrameSrc() === withLang(TRUNK_URL, 'zh-CN'))
+  if (fileChips().length !== 0)
+    throw new Error('file preview must leave worktree navigation to the Viewer')
+
+  const initialFrame = fileViewerRootEl.querySelector('iframe.uvf_frame')
+  setActiveLocale('en')
+  await waitFor(
+    '语言切换后 Viewer locale 同步跟随',
+    () => fileFrameSrc() === withLang(TRUNK_URL, 'en-US')
+  )
+  if (fileViewerRootEl.querySelector('iframe.uvf_frame') !== initialFrame)
+    throw new Error('locale changes must preserve the file preview iframe element')
+  setActiveLocale('zh')
+
+  worktrees = [wt('ready')]
+  renderFileViewer()
+  await waitFor(
+    'ready worktree 仍打开完整 Viewer',
+    () => fileFrameSrc() === withLang(TRUNK_URL, 'zh-CN')
+  )
+  if (fileChips().length !== 0)
+    throw new Error('ready worktrees must not add an outer scope switch')
+
+  // The Host may confirm the path is gone (an agent removed a temporary file).
+  missingFiles.add(DEMO_FILE)
+  renderFileViewer()
+  await waitFor('文件已不在工作区时给出说明', () =>
+    fileViewerRootEl.textContent.includes(t('viewer.missing'))
+  )
+
+  // A stopped Gateway must be actionable, not an endless load: the shared
+  // Turn-preview poll swallows this failure, so the phase is reported separately.
+  gatewayPhase = 'stopped'
+  renderFileViewer()
+  await waitFor('Gateway 停止时给出启动入口', () =>
+    fileViewerRootEl.textContent.includes(t('dock.gatewayDown'))
+  )
+  const startButton = Array.from(fileViewerRootEl.querySelectorAll('button')).find(
+    (button) => button.textContent === t('dock.startGateway')
+  )
+  if (startButton === undefined) throw new Error('stopped Gateway must offer a start action')
+  gatewayPhase = 'running'
+  missingFiles.delete(DEMO_FILE)
+
+  fileViewerRoot.unmount()
+  fileViewerRootEl.remove()
+}
+
+// ---- native right-Sidebar tab body: the host WITHOUT dsh-better-sidebar ----
+// The seat hands a body nothing but the resource address, so the address has to
+// carry both the session and the path; this proves the whole route works end to
+// end against the same fake Host state API the other surfaces use.
+{
+  const nativeRootEl = document.createElement('div')
+  document.body.appendChild(nativeRootEl)
+  const nativeRoot = createRoot(nativeRootEl)
+  const address = `dsh-resource://file/session/test-session-id/${encodeAddressPath(REL_DEMO_FILE)}`
+  worktrees = [wt('ready')]
+  nativeRoot.render(
+    React.createElement(nativeBodyEntry.Component, {
+      ctx: fakeCtx,
+      useTabInfo: () => ({ tab: { contentId: address } })
+    })
+  )
+  await waitFor(
+    '原生侧边栏标签按地址解析出文件与会话并渲染 Viewer',
+    () =>
+      nativeRootEl.querySelector('iframe.uvf_frame')?.getAttribute('src') ===
+      withLang(TRUNK_URL, 'zh-CN')
+  )
+  if (nativeRootEl.querySelector('[data-surface=sidebar-right]') === null)
+    throw new Error('the native tab body must report the surface it renders for')
+  if (nativeRootEl.querySelector('.uvf_unit') !== null)
+    throw new Error('the native file preview must leave worktree navigation to the Viewer')
+  nativeRoot.unmount()
+  nativeRootEl.remove()
+}
+
 server.close()
-console.log('client smoke OK (uiConversation Conversation API)')
+for (const dispose of settingsEffects.toReversed()) if (typeof dispose === 'function') dispose()
+if (settingsListeners.size !== 0) throw new Error('settings subscriptions survived unload')
+
+// Use Cordis itself to exercise dependency visibility and optional child fibers.
+// Set UNIVER_DSH_RUNTIME_ROOT to a separately installed DSH package directory
+// to run the same lifecycle regression against that release's Cordis.
+const runtimeRequire = process.env.UNIVER_DSH_RUNTIME_ROOT
+  ? createRequire(join(process.env.UNIVER_DSH_RUNTIME_ROOT, 'package.json'))
+  : repoRequire
+const { Context } = await import(pathToFileURL(runtimeRequire.resolve('@deepseek-ai/cordis')).href)
+const context = new Context()
+const liveEntries = new Set()
+const lifecycleSlots = {
+  inject(_name, callback) {
+    return context.effect(callback)
+  },
+  register(options) {
+    liveEntries.add(options)
+    return () => liveEntries.delete(options)
+  }
+}
+try {
+  context.provide('slots', lifecycleSlots)
+  context.provide('locale', fakeCtx.locale)
+  context.provide('conversation', {})
+  const fiber = context.plugin(pluginExports)
+  await fiber
+  if (fiber.state !== 0) throw new Error('Client must wait for uiConversation before activating')
+  context.provide('uiConversation', { events: conversationEventRegistry })
+  await fiber
+  if (fiber.state !== 2)
+    throw new Error('Absent optional services must not block Client activation')
+  if (!Array.from(liveEntries).some((entry) => entry.name === 'conversation.chat.turnTail'))
+    throw new Error('Real Cordis activation must register turn previews')
+  if (settingsListeners.size !== 0) throw new Error('Absent settings must not attach preferences')
+  context.provide(
+    modernSettings ? 'configForms' : 'settingsScope',
+    modernSettings ? fakeCtx.get('configForms') : fakeCtx.settingsScope
+  )
+  await waitFor('late Cordis settings attachment', () => settingsListeners.size === 1)
+  if (settingsListeners.size !== 1) throw new Error('Late settings must attach preferences once')
+  if (!Array.from(liveEntries).some((entry) => entry.name === 'plugins.bundle.config'))
+    throw new Error('Late settings must register the settings card')
+  await fiber.dispose()
+  if (settingsListeners.size !== 0) throw new Error('Real Cordis unload leaked preferences')
+} finally {
+  await context.fiber.dispose()
+}
+if (liveEntries.size !== 0) throw new Error('Real Cordis teardown leaked slot registrations')
+console.log(
+  `client smoke OK (uiConversation Conversation API, ${modernSettings ? 'configForms' : 'settingsScope'})`
+)
+if (!modernSettings) {
+  const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+    env: { ...process.env, UNIVER_SETTINGS_API: 'configForms' },
+    stdio: 'inherit'
+  })
+  if (child.status !== 0) throw new Error(`configForms smoke failed: ${child.status}`)
+}
