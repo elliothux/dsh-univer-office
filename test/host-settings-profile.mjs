@@ -1,12 +1,23 @@
 import { createRequire } from 'node:module'
-import { mkdtemp, mkdir, writeFile, copyFile, symlink, rm, readFile } from 'node:fs/promises'
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  copyFile,
+  symlink,
+  rm,
+  readFile,
+  realpath
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 // Run against an independently installed DSH 0.1.7+ package, without changing its profile.
-const runtime = process.env.UNIVER_DSH_RUNTIME_ROOT
-if (!runtime) throw new Error('Set UNIVER_DSH_RUNTIME_ROOT to the installed DSH package directory')
+const runtimeInput = process.env.UNIVER_DSH_RUNTIME_ROOT
+if (!runtimeInput)
+  throw new Error('Set UNIVER_DSH_RUNTIME_ROOT to the installed DSH package directory')
+const runtime = await realpath(runtimeInput)
 const repo = fileURLToPath(new URL('../', import.meta.url))
 const req = createRequire(join(runtime, 'package.json'))
 const { boot, initProfile, loadProfileDirectory, readProfilePatches } = await import(
@@ -16,10 +27,16 @@ const dir = await mkdtemp(join(tmpdir(), 'univer-settings-rc1-'))
 let ctx
 try {
   await mkdir(join(dir, 'node_modules/dsh-univer-office/lib'), { recursive: true })
-  await symlink(
-    dirname(dirname(req.resolve('@deepseek-ai/cordis/package.json'))),
-    join(dir, 'node_modules/@deepseek-ai')
-  )
+  await mkdir(join(dir, 'node_modules/@deepseek-ai'), { recursive: true })
+  const manifest = JSON.parse(await readFile(join(repo, 'package.json'), 'utf8'))
+  const peers = new Set([
+    ...Object.keys(manifest.peerDependencies),
+    '@deepseek-ai/dsh-config-editor'
+  ])
+  for (const name of peers) {
+    if (!name.startsWith('@deepseek-ai/')) continue
+    await symlink(dirname(req.resolve(`${name}/package.json`)), join(dir, 'node_modules', name))
+  }
   await Promise.all(
     ['libsql', 'puppeteer-core', '@puppeteer', '@univerjs-pro'].map((dep) =>
       symlink(join(repo, 'node_modules', dep), join(dir, 'node_modules', dep))
