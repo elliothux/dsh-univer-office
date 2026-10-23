@@ -209,13 +209,12 @@ DSH 会自动选择这些工具，日常使用不需要手动调用。
 | `resourceOperationTimeoutMs` | `120000` | 一次资源库工具操作的总超时 |
 | `tools` | `true` | 启用 Agent 编辑能力 |
 | `skills` | `true` | 启用内置任务指引 |
-| `telemetry` | `true` | 发送匿名产品遥测 |
 
 Viewer 页面、HTTP API 与 WebSocket 协作流量由插件直接挂载在 DSH WebServer origin 上（`/univer-viewer/...` 与 `/uf/...`），远程部署沿用现有 DSH 访问入口即可，无需额外反向代理配置。每个浏览器请求先通过 `connection` 服务完成 DSH 浏览器鉴权，再限定到指定 live session 的范围；Gateway 始终只监听 loopback，不对外暴露。（原 `viewerBaseUrl` 配置已随本次变更移除，保留时会被忽略。）
 
 ## 遥测
 
-插件激活后默认发送匿名使用统计（不含文件内容与路径），发布包不声明 `postinstall` 脚本。设 `DO_NOT_TRACK=1` 或配置 `telemetry: false` 关闭遥测。
+此构建在激活或卸载时均不发送产品遥测。
 
 ## 卸载
 

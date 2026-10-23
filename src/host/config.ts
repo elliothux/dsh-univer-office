@@ -46,8 +46,6 @@ export interface Config {
   tools?: boolean
   /** Register version-matched bundled Univer skills. */
   skills?: boolean
-  /** Send anonymous product telemetry; `DO_NOT_TRACK` also turns it off. */
-  telemetry?: boolean
 }
 
 /** Fully resolved configuration used by the implementation. */
@@ -71,7 +69,6 @@ export interface ResolvedConfig {
   readonly unitCacheTtlMs: number
   readonly tools: boolean
   readonly skills: boolean
-  readonly telemetry: boolean
 }
 
 /** Cordis configuration schema. */
@@ -94,8 +91,7 @@ export const Config: z<Config> = z.object({
   stateCacheTtlMs: z.natural().default(1_000),
   unitCacheTtlMs: z.natural().default(5_000),
   tools: z.boolean().default(true),
-  skills: z.boolean().default(true),
-  telemetry: z.boolean().default(true)
+  skills: z.boolean().default(true)
 })
 
 /** Apply defaults and reject configuration that cannot run. */
@@ -120,8 +116,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     stateCacheTtlMs: config.stateCacheTtlMs ?? 1_000,
     unitCacheTtlMs: config.unitCacheTtlMs ?? 5_000,
     tools: config.tools ?? true,
-    skills: config.skills ?? true,
-    telemetry: config.telemetry ?? true
+    skills: config.skills ?? true
   }
   if (
     !Number.isInteger(resolved.gatewayPort) ||

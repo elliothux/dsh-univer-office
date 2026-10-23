@@ -2,8 +2,8 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 /**
- * Single source of the `DSH_HOME` convention shared by config resolution and
- * telemetry state: unset falls back to `~/.dsh`, `~` and `~/` expand against
+ * `DSH_HOME` convention for config resolution: unset falls back to `~/.dsh`,
+ * `~` and `~/` expand against
  * the home directory, and anything else resolves against the current working
  * directory.
  */

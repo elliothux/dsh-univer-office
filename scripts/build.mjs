@@ -90,24 +90,6 @@ if (target === 'all' || target === 'lib') {
     `window.__ModuleLoader__.load({\n  id: "dsh-univer-office",\n  factory: (require) => {\n    var module = { exports: {} };\n    var exports = module.exports;\n${indent(clientCode, 4)}\n    return module.exports;\n  }\n});\n`
   )
 
-  // Product telemetry entry for the package uninstall hook.
-  await build({
-    entryPoints: ['src/host/telemetry/entry.ts'],
-    outfile: 'lib/telemetry-entry.js',
-    bundle: true,
-    platform: 'node',
-    target: 'node22',
-    format: 'esm',
-    legalComments: 'none',
-    sourcemap: false
-  })
-
-  // Telemetry endpoint hardcoded into every build: dev checkouts never invoke
-  // a sender (activation only runs inside an installed plugin), while runtime
-  // opt-outs (DO_NOT_TRACK, telemetry: false) and the UNIVER_TELEMETRY_ENDPOINT
-  // override still govern every send. The release workflow asserts the value
-  // before publishing, so a drift fails the release instead of going dark.
-  const telemetryEndpoint = 'https://univer.ai/api/telemetry/cli'
   const manifest = JSON.parse(await readFile('package.json', 'utf8'))
   let commit = ''
   try {
@@ -115,13 +97,13 @@ if (target === 'all' || target === 'lib') {
       .toString()
       .trim()
   } catch {
-    // Building outside a git checkout: telemetry payloads simply omit the commit.
+    // Building outside a git checkout keeps the package usable.
   }
   await writeFile(
     'lib/build-info.json',
-    `${JSON.stringify({ commit, telemetryEndpoint, version: manifest.version }, null, 2)}\n`
+    `${JSON.stringify({ commit, version: manifest.version })}\n`
   )
-  console.log('built lib/index.js + lib/client.js + lib/telemetry-entry.js')
+  console.log('built lib/index.js + lib/client.js')
 }
 
 if (target === 'all' || target === 'worker') {
